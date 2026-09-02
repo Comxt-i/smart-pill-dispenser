@@ -1,0 +1,17 @@
+# Local secrets
+**/secrets.h
+
+# Arduino build output
+build/
+*.elf
+*.hex
+*.bin
+*.map
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+
