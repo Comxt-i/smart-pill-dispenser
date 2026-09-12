@@ -65,4 +65,3 @@ void showNextMedicine(const char *medicineName, uint8_t hour, uint8_t minute)
   lcdMedicine.setCursor(0, 1);
   lcdMedicine.print(nextTime);
 }
-

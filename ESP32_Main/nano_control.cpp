@@ -4,26 +4,12 @@
 #include <Wire.h>
 
 namespace {
-uint8_t addressForLane(uint8_t lane)
+bool sendCommand(uint8_t command, uint8_t dispenser, uint8_t amount)
 {
-  switch (lane)
-  {
-    case 1: return NANO1_ADDRESS;
-    case 2: return NANO2_ADDRESS;
-    case 3: return NANO3_ADDRESS;
-    default: return 0;
-  }
-}
-
-bool sendCommand(uint8_t lane, uint8_t command, uint8_t value)
-{
-  uint8_t address = addressForLane(lane);
-  if (address == 0)
-    return false;
-
-  Wire.beginTransmission(address);
+  Wire.beginTransmission(NANO_DISPENSER_ADDRESS);
   Wire.write(command);
-  Wire.write(value);
+  Wire.write(dispenser);
+  Wire.write(amount);
   return Wire.endTransmission() == 0;
 }
 }
@@ -33,13 +19,15 @@ void nanoControlBegin()
   // Wire.begin() is called once in ESP32_Main.ino.
 }
 
-bool dispenseMedicine(uint8_t lane, uint8_t amount)
+bool dispenseMedicine(uint8_t dispenser, uint8_t amount)
 {
-  return sendCommand(lane, CMD_DISPENSE, amount);
+  if (dispenser < 1 || dispenser > 3 || amount < 1 || amount > 9)
+    return false;
+
+  return sendCommand(CMD_DISPENSE, dispenser, amount);
 }
 
-bool stopLane(uint8_t lane)
+bool stopDispenser()
 {
-  return sendCommand(lane, CMD_STOP, 0);
+  return sendCommand(CMD_STOP, 0, 0);
 }
-

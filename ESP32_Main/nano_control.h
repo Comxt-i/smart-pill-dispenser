@@ -3,6 +3,5 @@
 #include <Arduino.h>
 
 void nanoControlBegin();
-bool dispenseMedicine(uint8_t lane, uint8_t amount);
-bool stopLane(uint8_t lane);
-
+bool dispenseMedicine(uint8_t dispenser, uint8_t amount);
+bool stopDispenser();

@@ -7,7 +7,7 @@
 namespace {
 WebServer server(80);
 bool requestPending = false;
-uint8_t requestedLane = 1;
+uint8_t requestedDispenser = 1;
 uint8_t requestedAmount = 1;
 
 void handleHome()
@@ -16,7 +16,7 @@ void handleHome()
     "<!doctype html><html><body>"
     "<h1>Smart Pill Dispenser</h1>"
     "<form action='/dispense'>"
-    "Lane <input name='lane' type='number' min='1' max='3' value='1'><br>"
+    "Medicine dispenser <input name='dispenser' type='number' min='1' max='3' value='1'><br>"
     "Amount <input name='amount' type='number' min='1' max='9' value='1'><br>"
     "<button type='submit'>Dispense</button>"
     "</form></body></html>";
@@ -26,16 +26,16 @@ void handleHome()
 
 void handleDispense()
 {
-  int lane = server.arg("lane").toInt();
+  int dispenser = server.arg("dispenser").toInt();
   int amount = server.arg("amount").toInt();
 
-  if (lane < 1 || lane > 3 || amount < 1 || amount > 9)
+  if (dispenser < 1 || dispenser > 3 || amount < 1 || amount > 9)
   {
-    server.send(400, "text/plain", "Invalid lane or amount");
+    server.send(400, "text/plain", "Invalid dispenser or amount");
     return;
   }
 
-  requestedLane = static_cast<uint8_t>(lane);
+  requestedDispenser = static_cast<uint8_t>(dispenser);
   requestedAmount = static_cast<uint8_t>(amount);
   requestPending = true;
   server.send(200, "text/plain", "Dispense request queued");
@@ -67,14 +67,13 @@ void wifiWebLoop()
   server.handleClient();
 }
 
-bool takeDispenseRequest(uint8_t &lane, uint8_t &amount)
+bool takeDispenseRequest(uint8_t &dispenser, uint8_t &amount)
 {
   if (!requestPending)
     return false;
 
-  lane = requestedLane;
+  dispenser = requestedDispenser;
   amount = requestedAmount;
   requestPending = false;
   return true;
 }
-

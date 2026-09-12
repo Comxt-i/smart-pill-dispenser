@@ -29,21 +29,18 @@ void loop()
   wifiWebLoop();
   rtcLcdUpdate();
 
-  uint8_t lane;
+  uint8_t dispenser;
   uint8_t amount;
 
-  if (takeDispenseRequest(lane, amount))
+  if (takeDispenseRequest(dispenser, amount))
   {
-    bool sent = dispenseMedicine(lane, amount);
+    bool sent = dispenseMedicine(dispenser, amount);
     Serial.println(sent ? "Command sent" : "Command failed");
   }
 
   if (digitalRead(CANCEL_BUTTON_PIN) == LOW)
   {
-    stopLane(1);
-    stopLane(2);
-    stopLane(3);
+    stopDispenser();
     delay(250);
   }
 }
-

@@ -4,5 +4,4 @@
 
 void wifiWebBegin();
 void wifiWebLoop();
-bool takeDispenseRequest(uint8_t &lane, uint8_t &amount);
-
+bool takeDispenseRequest(uint8_t &dispenser, uint8_t &amount);
