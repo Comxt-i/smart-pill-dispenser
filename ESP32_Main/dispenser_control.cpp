@@ -9,19 +9,53 @@ Servo dispenserServos[DISPENSER_COUNT];
 Phase phase = Phase::Idle;
 uint8_t activeIndex = 0;
 uint8_t remainingCycles = 0;
+uint8_t requestedCycles = 0;
+uint8_t completedCycles = 0;
 unsigned long phaseStartedMs = 0;
+
+DispenseOutcome lastOutcome = {0, 0, 0, false};
+bool outcomePending = false;
+
+void detachAll()
+{
+  for (uint8_t index = 0; index < DISPENSER_COUNT; ++index)
+  {
+    if (dispenserServos[index].attached())
+      dispenserServos[index].detach();
+  }
+}
+
+/** ปิดรอบการทำงานปัจจุบันและเก็บผลไว้ให้ loop หลักมาอ่าน */
+void finishRun(bool cancelled)
+{
+  const bool wasRunning = phase != Phase::Idle;
+
+  detachAll();
+  remainingCycles = 0;
+  phase = Phase::Idle;
+
+  if (!wasRunning)
+    return;
+
+  lastOutcome.dispenser = static_cast<uint8_t>(activeIndex + 1);
+  lastOutcome.requestedCycles = requestedCycles;
+  lastOutcome.completedCycles = completedCycles;
+  lastOutcome.cancelled = cancelled;
+  outcomePending = true;
+}
 }
 
 void dispenserControlBegin()
 {
-  stopDispenser();
+  finishRun(false);
+  outcomePending = false;
   for (uint8_t index = 0; index < DISPENSER_COUNT; ++index)
     dispenserServos[index].setPeriodHertz(50);
 }
 
 DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t amount)
 {
-  if (dispenser < 1 || dispenser > DISPENSER_COUNT || amount < 1 || amount > 9)
+  if (dispenser < 1 || dispenser > DISPENSER_COUNT || amount < 1 || amount > MAX_CYCLES_PER_DOSE)
     return DispenseResult::Invalid;
   if (digitalRead(CANCEL_BUTTON_PIN) == LOW)
     return DispenseResult::Cancelled;
@@ -37,6 +71,8 @@ DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t amount)
     return DispenseResult::ServoError;
 
   remainingCycles = amount;
+  requestedCycles = amount;
+  completedCycles = 0;
   servo.writeMicroseconds(RELEASE_PULSE_US[activeIndex]);
   phaseStartedMs = millis();
   phase = Phase::Releasing;
@@ -47,7 +83,7 @@ void dispenserControlUpdate()
 {
   if (digitalRead(CANCEL_BUTTON_PIN) == LOW)
   {
-    stopDispenser();
+    finishRun(true);
     return;
   }
   if (phase == Phase::Idle || millis() - phaseStartedMs < MOVE_TIME_MS)
@@ -59,14 +95,15 @@ void dispenserControlUpdate()
     servo.writeMicroseconds(REST_PULSE_US[activeIndex]);
     phase = Phase::Resting;
   }
-  else if (--remainingCycles == 0)
-  {
-    stopDispenser();
-    Serial.println("Servo cycles complete (pill count not verified)");
-    return;
-  }
   else
   {
+    ++completedCycles;
+    if (--remainingCycles == 0)
+    {
+      finishRun(false);
+      Serial.println("Servo cycles complete (pill count not verified)");
+      return;
+    }
     servo.writeMicroseconds(RELEASE_PULSE_US[activeIndex]);
     phase = Phase::Releasing;
   }
@@ -75,11 +112,20 @@ void dispenserControlUpdate()
 
 void stopDispenser()
 {
-  for (uint8_t index = 0; index < DISPENSER_COUNT; ++index)
-  {
-    if (dispenserServos[index].attached())
-      dispenserServos[index].detach();
-  }
-  remainingCycles = 0;
-  phase = Phase::Idle;
+  finishRun(phase != Phase::Idle);
+}
+
+bool dispenserIsBusy()
+{
+  return phase != Phase::Idle;
+}
+
+bool takeDispenseOutcome(DispenseOutcome &outcome)
+{
+  if (!outcomePending)
+    return false;
+
+  outcome = lastOutcome;
+  outcomePending = false;
+  return true;
 }

@@ -1,5 +1,7 @@
 # Local secrets
 **/secrets.h
+# ยกเว้นค่าปลอมที่ใช้ตรวจไวยากรณ์ ไม่มีข้อมูลจริงอยู่ในไฟล์นี้
+!tests/syntax/secrets.h
 
 # Arduino build output
 build/

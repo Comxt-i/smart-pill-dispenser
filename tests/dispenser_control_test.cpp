@@ -18,8 +18,12 @@ void tick()
 
 int main()
 {
+  DispenseOutcome outcome = {0, 0, 0, false};
+
   dispenserControlBegin();
   assert(attachedCount == 0 && pulses.empty());
+  assert(!dispenserIsBusy());
+  assert(!takeDispenseOutcome(outcome)); // ยังไม่เคยจ่าย จึงยังไม่มีผลให้อ่าน
   assert(dispenseMedicine(0, 1) == DispenseResult::Invalid);
   assert(dispenseMedicine(4, 1) == DispenseResult::Invalid);
   assert(dispenseMedicine(1, 0) == DispenseResult::Invalid);
@@ -33,6 +37,8 @@ int main()
     assert(dispenseMedicine(1, 1) == DispenseResult::Disabled);
     tick();
     assert(attachedCount == 0 && pulses.empty());
+    assert(!dispenserIsBusy());
+    assert(!takeDispenseOutcome(outcome)); // คำสั่งที่ถูกปฏิเสธต้องไม่ถูกรายงานว่าจ่ายแล้ว
     return 0;
   }
 
@@ -43,6 +49,7 @@ int main()
     const uint8_t amount = unit == 3 ? 9 : 1;
     assert(dispenseMedicine(unit, amount) == DispenseResult::Started);
     assert(attachedCount == 1);
+    assert(dispenserIsBusy());
     const unsigned long started = fakeMillis;
     fakeMillis += MOVE_TIME_MS - 1;
     dispenserControlUpdate();
@@ -56,6 +63,12 @@ int main()
       tick();
     }
     assert(attachedCount == 0);
+    assert(!dispenserIsBusy());
+    assert(takeDispenseOutcome(outcome));
+    assert(outcome.dispenser == unit);
+    assert(outcome.requestedCycles == amount && outcome.completedCycles == amount);
+    assert(!outcome.cancelled);
+    assert(!takeDispenseOutcome(outcome)); // ผลหนึ่งรอบอ่านได้ครั้งเดียว
     assert(pulses.size() == 2u * amount);
     for (unsigned i = 0; i < pulses.size(); ++i)
     {
@@ -76,7 +89,11 @@ int main()
     cancelLevel = LOW;
     dispenserControlUpdate();
     assert(attachedCount == 0);
+    assert(takeDispenseOutcome(outcome));
+    assert(outcome.cancelled && outcome.dispenser == 2);
+    assert(outcome.completedCycles < outcome.requestedCycles);
     assert(dispenseMedicine(3, 1) == DispenseResult::Cancelled);
+    assert(!takeDispenseOutcome(outcome)); // คำสั่งที่ถูกปฏิเสธไม่นับเป็นหนึ่งรอบ
     cancelLevel = HIGH;
     tick();
     assert(pulses.size() == beforeCancel);
@@ -86,9 +103,12 @@ int main()
   assert(dispenseMedicine(1, 1) == DispenseResult::ServoError);
   assert(attachedCount == 0);
   failAttach = false;
+  assert(!takeDispenseOutcome(outcome)); // attach ไม่สำเร็จ ไม่ใช่รอบที่เริ่มแล้ว
   assert(dispenseMedicine(1, 1) == DispenseResult::Started);
   stopDispenser();
+  assert(takeDispenseOutcome(outcome) && outcome.cancelled);
   stopDispenser(); // Stopping an idle controller is harmless.
+  assert(!takeDispenseOutcome(outcome)); // หยุดตอนที่ว่างอยู่ต้องไม่สร้างผลหลอก
   assert(attachedCount == 0);
 
   // Unsigned elapsed-time calculation must survive clock rollover.
@@ -99,4 +119,6 @@ int main()
   assert(pulses.size() == 2 && attachedCount == 1);
   tick();
   assert(attachedCount == 0);
+  assert(takeDispenseOutcome(outcome));
+  assert(outcome.dispenser == 3 && outcome.completedCycles == 1 && !outcome.cancelled);
 }

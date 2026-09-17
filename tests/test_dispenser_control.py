@@ -20,11 +20,11 @@ class DispenserControlTest(unittest.TestCase):
                     shutil.copy(ROOT / "ESP32_Main" / name, build / name)
                 config = build / "config.h"
                 if enabled:
-                    original = config.read_text()
+                    original = config.read_text(encoding="utf-8")
                     self.assertIn("ENABLE_SERVO_MOVEMENT = false;", original)
                     config.write_text(original.replace(
                         "ENABLE_SERVO_MOVEMENT = false;", "ENABLE_SERVO_MOVEMENT = true;"
-                    ))
+                    ), encoding="utf-8")
                 executable = build / "controller_test"
                 subprocess.run([
                     compiler, "-std=c++11", "-Wall", "-Wextra", "-Werror",
