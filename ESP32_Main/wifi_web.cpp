@@ -1,4 +1,5 @@
 #include "wifi_web.h"
+#include "dispenser_control.h"
 #include "secrets.h"
 
 #include <WebServer.h>
@@ -6,9 +7,6 @@
 
 namespace {
 WebServer server(80);
-bool requestPending = false;
-uint8_t requestedDispenser = 1;
-uint8_t requestedAmount = 1;
 
 void handleHome()
 {
@@ -17,7 +15,7 @@ void handleHome()
     "<h1>Smart Pill Dispenser</h1>"
     "<form action='/dispense'>"
     "Medicine dispenser <input name='dispenser' type='number' min='1' max='3' value='1'><br>"
-    "Amount <input name='amount' type='number' min='1' max='9' value='1'><br>"
+    "Cycles (pill count unverified) <input name='amount' type='number' min='1' max='9' value='1'><br>"
     "<button type='submit'>Dispense</button>"
     "</form></body></html>";
 
@@ -35,10 +33,29 @@ void handleDispense()
     return;
   }
 
-  requestedDispenser = static_cast<uint8_t>(dispenser);
-  requestedAmount = static_cast<uint8_t>(amount);
-  requestPending = true;
-  server.send(200, "text/plain", "Dispense request queued");
+  const DispenseResult result = dispenseMedicine(static_cast<uint8_t>(dispenser),
+                                                static_cast<uint8_t>(amount));
+  switch (result)
+  {
+    case DispenseResult::Started:
+      server.send(202, "text/plain", "Servo cycles started; pill count not verified");
+      break;
+    case DispenseResult::Invalid:
+      server.send(400, "text/plain", "Invalid dispenser or amount");
+      break;
+    case DispenseResult::Disabled:
+      server.send(503, "text/plain", "Servo movement disabled: calibrate and enable in config.h");
+      break;
+    case DispenseResult::Busy:
+      server.send(409, "text/plain", "Dispenser busy; request rejected");
+      break;
+    case DispenseResult::Cancelled:
+      server.send(409, "text/plain", "Cancel button is pressed; request rejected");
+      break;
+    case DispenseResult::ServoError:
+      server.send(503, "text/plain", "Unable to attach servo");
+      break;
+  }
 }
 }
 
@@ -65,15 +82,4 @@ void wifiWebBegin()
 void wifiWebLoop()
 {
   server.handleClient();
-}
-
-bool takeDispenseRequest(uint8_t &dispenser, uint8_t &amount)
-{
-  if (!requestPending)
-    return false;
-
-  dispenser = requestedDispenser;
-  amount = requestedAmount;
-  requestPending = false;
-  return true;
 }

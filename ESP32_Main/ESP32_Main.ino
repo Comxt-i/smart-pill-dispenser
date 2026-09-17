@@ -1,7 +1,7 @@
 #include <Wire.h>
 
 #include "config.h"
-#include "nano_control.h"
+#include "dispenser_control.h"
 #include "rtc_lcd.h"
 #include "wifi_web.h"
 
@@ -20,27 +20,16 @@ void setup()
   Wire.setClock(100000);
 
   rtcLcdBegin();
-  nanoControlBegin();
+  dispenserControlBegin();
   wifiWebBegin();
 }
 
 void loop()
 {
-  wifiWebLoop();
-  rtcLcdUpdate();
-
-  uint8_t dispenser;
-  uint8_t amount;
-
-  if (takeDispenseRequest(dispenser, amount))
-  {
-    bool sent = dispenseMedicine(dispenser, amount);
-    Serial.println(sent ? "Command sent" : "Command failed");
-  }
-
   if (digitalRead(CANCEL_BUTTON_PIN) == LOW)
-  {
     stopDispenser();
-    delay(250);
-  }
+
+  wifiWebLoop();
+  dispenserControlUpdate();
+  rtcLcdUpdate();
 }
