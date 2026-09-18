@@ -10,16 +10,19 @@ import subprocess
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# (โฟลเดอร์ของ sketch, ไฟล์ที่จะตรวจ)
 SOURCES = [
-    "alert.cpp",
-    "buttons.cpp",
-    "dispenser_control.cpp",
-    "event_queue.cpp",
-    "net_sync.cpp",
-    "pill_app.cpp",
-    "rtc_lcd.cpp",
-    "schedule_store.cpp",
-    "wifi_web.cpp",
+    ("ESP32_Main", "alert.cpp"),
+    ("ESP32_Main", "buttons.cpp"),
+    ("ESP32_Main", "dispenser_control.cpp"),
+    ("ESP32_Main", "event_queue.cpp"),
+    ("ESP32_Main", "net_sync.cpp"),
+    ("ESP32_Main", "pill_app.cpp"),
+    ("ESP32_Main", "rtc_lcd.cpp"),
+    ("ESP32_Main", "schedule_store.cpp"),
+    ("ESP32_Main", "wifi_web.cpp"),
+    ("examples/TestDispenseEvent", "TestDispenseEvent.ino"),
 ]
 
 
@@ -28,21 +31,30 @@ class FirmwareSyntaxTest(unittest.TestCase):
         compiler = shutil.which("c++")
         self.assertIsNotNone(compiler, "Install a C++ compiler to run these tests")
 
-        for name in SOURCES:
-            with self.subTest(source=name):
+        for folder, name in SOURCES:
+            with self.subTest(source="%s/%s" % (folder, name)):
+                command = [
+                    compiler,
+                    "-fsyntax-only",
+                    "-std=c++17",
+                    "-Wall",
+                    "-Wextra",
+                    "-I",
+                    str(ROOT / "tests/syntax"),
+                    # ให้ไฟล์ในโฟลเดอร์ sketch เดียวกัน include หากันได้
+                    # เหมือนตอนที่ Arduino IDE คอมไพล์ทั้งโฟลเดอร์รวมกัน
+                    "-I",
+                    str(ROOT / folder),
+                ]
+
+                # .ino เป็น C++ แต่ g++ ไม่รู้จักนามสกุลนี้ ต้องบอกภาษาให้ชัด
+                if name.endswith(".ino"):
+                    command += ["-x", "c++"]
+
+                command.append(str(ROOT / folder / name))
+
                 result = subprocess.run(
-                    [
-                        compiler,
-                        "-fsyntax-only",
-                        "-std=c++17",
-                        "-Wall",
-                        "-Wextra",
-                        "-I",
-                        str(ROOT / "tests/syntax"),
-                        "-I",
-                        str(ROOT / "ESP32_Main"),
-                        str(ROOT / "ESP32_Main" / name),
-                    ],
+                    command,
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
@@ -51,7 +63,7 @@ class FirmwareSyntaxTest(unittest.TestCase):
                 self.assertEqual(
                     result.returncode,
                     0,
-                    "%s ไม่ผ่านการตรวจไวยากรณ์:\n%s" % (name, result.stderr),
+                    "%s/%s ไม่ผ่านการตรวจไวยากรณ์:\n%s" % (folder, name, result.stderr),
                 )
 
 

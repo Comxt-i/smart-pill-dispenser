@@ -52,6 +52,8 @@ smart-pill-dispenser/
 │   ├── config.h
 │   ├── certs.h               # root CA ของ Let's Encrypt สำหรับตรวจใบรับรอง HTTPS
 │   └── secrets.example.h
+├── examples/
+│   └── TestDispenseEvent/    # sketch ทดสอบยิงผลการกดรับยาขึ้น server (ไม่ต้องต่อกลไก)
 ├── tests/
 │   ├── syntax/               # header จำลองสำหรับตรวจไวยากรณ์บนคอมพิวเตอร์
 │   └── ...
@@ -105,6 +107,14 @@ smart-pill-dispenser/
 7. เปิด Serial Monitor ที่ 115200 baud แล้วเปิด IP ที่แสดงหลังเชื่อมต่อ Wi-Fi
    เพื่อดูหน้าสถานะในเครื่อง (ตาราง สถานะ sync คิวที่ค้าง และปุ่มทดสอบจ่ายยา)
 
+## ทดสอบการเชื่อมต่อก่อนประกอบกลไก
+
+ถ้าอยากตรวจว่า ESP32 คุยกับ server ได้จริงก่อนจะต่อ LCD, RTC และ Servo
+ให้อัปโหลด [examples/TestDispenseEvent](examples/TestDispenseEvent/) แทน
+sketch นั้นต่อแค่บอร์ดกับสาย USB ก็ทดสอบได้ ใช้ไลบรารีแค่ ArduinoJson
+และมีคำสั่งผ่าน Serial สำหรับยิง `DISPENSED` / `MISSED` / `SKIPPED` / `FAILED`
+รวมถึงทดสอบการส่งซ้ำเพื่อพิสูจน์ว่าระบบกันบันทึกซ้ำได้จริง
+
 ## พฤติกรรมเมื่อเน็ตหรือไฟมีปัญหา
 
 - **Wi-Fi หลุด**: นาฬิกา ปุ่มกด เสียงเตือน และการจ่ายยายังทำงานต่อจากตารางที่ดึงไว้ล่าสุด
@@ -128,8 +138,9 @@ python3 tests/test_firmware_syntax.py
   รวมถึงการรายงานผลหนึ่งรอบผ่าน `takeDispenseOutcome()`
 - `test_schedule_store.py` ทดสอบตรรกะตารางยา: การเตือน การนับว่าขาดยา การข้ามมื้อที่เลยมานานตอนบูต
   การคงสถานะเมื่อ sync ระหว่างวัน การข้ามวัน และช่องที่ถูกปิดใช้งาน
-- `test_firmware_syntax.py` ตรวจไวยากรณ์ของทุกโมดูลด้วย header จำลองใน `tests/syntax/`
-  จับพวกพิมพ์ผิด ลืม include และเรียกฟังก์ชันผิด signature ได้โดยไม่ต้องมี ESP32 toolchain
+- `test_firmware_syntax.py` ตรวจไวยากรณ์ของทุกโมดูล **รวมถึง sketch ใน `examples/`**
+  ด้วย header จำลองใน `tests/syntax/` จับพวกพิมพ์ผิด ลืม include และเรียกฟังก์ชันผิด
+  signature ได้โดยไม่ต้องมี ESP32 toolchain
 
 การทดสอบเหล่านี้ **ไม่แทน** การ compile ด้วย ESP32 toolchain จริงหรือการทดสอบกับบอร์ดและกลไกจริง
 `tests/syntax/` เป็น header จำลองแบบว่างเปล่า ไม่ได้ตรวจพฤติกรรมของไลบรารีจริง

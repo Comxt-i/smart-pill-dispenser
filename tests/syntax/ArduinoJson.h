@@ -5,8 +5,18 @@
 
 class DeserializationError {
  public:
-  explicit operator bool() const { return false; }
+  enum Code { Ok, EmptyInput, IncompleteInput, InvalidInput, NoMemory, TooDeep };
+
+  DeserializationError() {}
+  DeserializationError(Code value) : code(value) {}
+
+  explicit operator bool() const { return code != Ok; }
   const char *c_str() const { return "Ok"; }
+
+  bool operator==(Code other) const { return code == other; }
+  bool operator!=(Code other) const { return code != other; }
+
+  Code code = Ok;
 };
 
 /** ตัวแทนของ JsonVariant / JsonObject / JsonArray รวมกัน เพียงพอสำหรับตรวจไวยากรณ์ */

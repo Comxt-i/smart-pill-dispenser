@@ -14,6 +14,7 @@ class HTTPClient {
   int GET() { return 200; }
   int POST(const String &) { return 200; }
   Stream &getStream() { return stream; }
+  String getString() { return String(""); }
   void end() {}
 
  private:

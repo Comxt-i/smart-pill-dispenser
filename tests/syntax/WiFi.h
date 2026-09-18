@@ -25,6 +25,7 @@ class WiFiClass {
   int status() { return WL_CONNECTED; }
   IPAddress localIP() { return IPAddress(); }
   int RSSI() { return -50; }
+  String macAddress() { return String("00:00:00:00:00:00"); }
 };
 
 extern WiFiClass WiFi;
