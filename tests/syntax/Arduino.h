@@ -46,6 +46,11 @@ class String {
     return *this;
   }
   String operator+(const String &other) const { return String(text + other.text); }
+
+  // String ของ Arduino จริงเทียบกันได้ทั้งกับ String และ const char*
+  bool operator==(const String &other) const { return text == other.text; }
+  bool operator!=(const String &other) const { return text != other.text; }
+  bool operator==(const char *other) const { return text == (other ? other : ""); }
   String &operator=(const char *value) {
     text = value ? value : "";
     return *this;

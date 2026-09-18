@@ -140,6 +140,80 @@ void prepareRequest(HTTPClient &http)
 // 1) Wi-Fi และนาฬิกา
 // ---------------------------------------------------------------------------
 
+/**
+ * บอกสาเหตุที่เชื่อมต่อไม่ได้ให้ชัด แทนที่จะบอกแค่ว่าไม่สำเร็จ
+ *
+ * จุดสำคัญคือแยกให้ออกระหว่าง "หาชื่อเครือข่ายไม่เจอ" กับ "เจอแต่รหัสผ่านผิด"
+ * แล้วสแกนเครือข่ายรอบตัวมาให้เทียบตัวสะกดทีละตัวอักษร
+ */
+void diagnoseWifiFailure()
+{
+  Serial.println();
+  Serial.println("======== เชื่อมต่อ Wi-Fi ไม่สำเร็จ ========");
+  Serial.printf("ชื่อที่ตั้งไว้ใน secrets.h: [%s]\n", WIFI_SSID);
+  Serial.printf("ความยาวชื่อ %u ไบต์ (วงเล็บเหลี่ยมช่วยให้เห็นเว้นวรรคหัวท้าย)\n",
+                static_cast<unsigned>(strlen(WIFI_SSID)));
+
+  // พิมพ์เป็น hex เพื่อจับอักขระที่มองไม่เห็น เช่น เว้นวรรคท้าย หรือภาษาไทย/อีโมจิ
+  // ที่กินหลายไบต์ ซึ่งอาจทำให้ชื่อไม่ตรงกับที่ AP กระจายจริง
+  Serial.print("ชื่อในรูปแบบ hex: ");
+  for (size_t i = 0; i < strlen(WIFI_SSID); ++i)
+    Serial.printf("%02X ", static_cast<unsigned char>(WIFI_SSID[i]));
+  Serial.println();
+
+  const size_t passwordLength = strlen(WIFI_PASSWORD);
+  Serial.printf("ความยาวรหัสผ่าน %u ไบต์", static_cast<unsigned>(passwordLength));
+  if (passwordLength > 0 && passwordLength < 8)
+    Serial.print("  <-- สั้นเกินไป! WPA2 ต้องอย่างน้อย 8 ตัวอักษร");
+  Serial.println();
+
+  switch (WiFi.status())
+  {
+    case WL_NO_SSID_AVAIL:
+      Serial.println("สาเหตุ: หาเครือข่ายชื่อนี้ไม่เจอ");
+      Serial.println("  -> ชื่อสะกดไม่ตรง (ตัวพิมพ์เล็ก/ใหญ่มีผล) หรือเป็น Wi-Fi 5GHz");
+      Serial.println("  -> ESP32 รองรับเฉพาะ 2.4GHz เท่านั้น");
+      break;
+    case WL_CONNECT_FAILED:
+      Serial.println("สาเหตุ: เจอเครือข่ายแล้วแต่เข้าไม่ได้");
+      Serial.println("  -> รหัสผ่านผิด หรือเราเตอร์กรอง MAC address อยู่");
+      break;
+    case WL_DISCONNECTED:
+      Serial.println("สาเหตุ: ยังเชื่อมต่อไม่เสร็จภายในเวลาที่รอ");
+      Serial.println("  -> สัญญาณอ่อนเกินไป หรือเราเตอร์ตอบช้า");
+      break;
+    default:
+      Serial.printf("สถานะจาก WiFi.status() = %d\n", static_cast<int>(WiFi.status()));
+      break;
+  }
+
+  Serial.println();
+  Serial.println("---- เครือข่าย 2.4GHz ที่บอร์ดนี้มองเห็น ----");
+  const int found = WiFi.scanNetworks();
+  if (found <= 0)
+  {
+    Serial.println("  ไม่เจอเครือข่ายใดเลย ลองขยับบอร์ดเข้าใกล้เราเตอร์");
+  }
+  else
+  {
+    for (int i = 0; i < found; ++i)
+    {
+      // ถ้าชื่อที่ต้องการอยู่ในรายการนี้ แปลว่าเป็น 2.4GHz และสะกดตามที่เห็น
+      const bool match = WiFi.SSID(i) == String(WIFI_SSID);
+      Serial.printf("  %s[%s] ch.%d %d dBm %s\n",
+                    match ? "*** " : "    ",
+                    WiFi.SSID(i).c_str(),
+                    WiFi.channel(i),
+                    static_cast<int>(WiFi.RSSI(i)),
+                    WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "(เปิด)" : "(มีรหัส)");
+    }
+    Serial.println("  บรรทัดที่มี *** คือชื่อที่ตรงกับใน secrets.h");
+    Serial.println("  ถ้าไม่มี *** เลย = ชื่อไม่ตรง หรือเครือข่ายนั้นเป็น 5GHz");
+  }
+  WiFi.scanDelete();
+  Serial.println("==========================================");
+}
+
 void connectWifi()
 {
   Serial.printf("[Wi-Fi] กำลังเชื่อมต่อ %s", WIFI_SSID);
@@ -155,7 +229,7 @@ void connectWifi()
 
   if (WiFi.status() != WL_CONNECTED)
   {
-    Serial.println("[Wi-Fi] เชื่อมต่อไม่สำเร็จ ตรวจ SSID/รหัสผ่านใน secrets.h");
+    diagnoseWifiFailure();
     return;
   }
 
