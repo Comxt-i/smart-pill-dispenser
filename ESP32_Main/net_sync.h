@@ -43,3 +43,6 @@ bool netSyncLastCallOk();
 unsigned long netSyncLastOkMs();
 const char *netSyncLastError();
 const char *netSyncConfigVersion();
+
+/** Complete a logged-in setup session using the hardware API key. Returns HTTP status or 0 while waiting for TLS. */
+int netSyncCompleteSetup(const char *token);

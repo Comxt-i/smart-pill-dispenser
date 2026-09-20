@@ -501,3 +501,19 @@ const char *netSyncConfigVersion()
 {
   return configVersion;
 }
+
+int netSyncCompleteSetup(const char *token)
+{
+  if (WiFi.status() != WL_CONNECTED) return 0;
+  WiFiClient *client = networkClient();
+  if (!client) return 0;
+  char url[224]; buildUrl(url, sizeof(url), "/api/device/setup/complete");
+  HTTPClient http;
+  if (!http.begin(*client, url)) return 0;
+  prepare(http);
+  JsonDocument doc; doc["token"] = token;
+  String body; serializeJson(doc, body);
+  const int code = http.POST(body);
+  http.end();
+  return code;
+}

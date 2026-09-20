@@ -9,3 +9,6 @@ void wifiWebBegin();
 void wifiWebLoop();
 
 bool wifiIsConnected();
+
+/** True while physical setup is active; normal sync/dispensing must wait. */
+bool wifiSetupActive();

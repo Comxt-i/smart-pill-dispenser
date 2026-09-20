@@ -2,8 +2,8 @@
 
 // คัดลอกไฟล์นี้เป็น secrets.h แล้วแก้ค่าให้ตรงกับระบบของตนเอง (secrets.h ถูก .gitignore ไว้)
 
-#define WIFI_SSID "YOUR_WIFI_NAME"
-#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+#define WIFI_SSID "" // Legacy only: new firmware configures Wi-Fi through the setup portal.
+#define WIFI_PASSWORD ""
 
 // URL ของ backend โดยไม่ต้องมี / ปิดท้าย รองรับทั้ง http และ https
 //
@@ -15,6 +15,8 @@
 //   ห้ามใช้ localhost เพราะ localhost ของ ESP32 คือตัวมันเอง และ backend ต้อง listen ที่ 0.0.0.0
 #define SERVER_BASE_URL "https://pillbox.example.com"
 
+// API Key เฉพาะเครื่องจากตาราง Device; ต้องลงทะเบียนเครื่องก่อน flash ครั้งแรก
+// QR และรหัส Wi-Fi Setup สร้างได้ที่หน้าเว็บไซต์ /devices/<id>/label
 // API Key ของอุปกรณ์จากตาราง Device ในฐานข้อมูล
 // ค่าที่ seed ไว้ให้ทดสอบคือ esp32_sec_key_246f28abc199
 #define DEVICE_API_KEY "esp32_sec_key_246f28abc199"

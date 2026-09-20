@@ -435,6 +435,9 @@ void appLoop()
   dispenserControlUpdate();
   rtcLcdUpdate();
 
+  // Setup is entered only at boot; preserve emergency buttons while configuring Wi-Fi.
+  if (wifiSetupActive()) { handleButtons(); lcdShowMessage("Wi-Fi Setup", "192.168.4.1"); return; }
+
   // ตารางยาของวันใหม่ต้องดึงใหม่ทันทีที่ข้ามเที่ยงคืน
   if (scheduleConsumeDayRollover())
     netSyncRequestNow();

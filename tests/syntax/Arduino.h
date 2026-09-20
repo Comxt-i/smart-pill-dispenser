@@ -36,6 +36,9 @@ class String {
   String(float value, int = 2) : text(std::to_string(value)) {}
   String(double value, int = 2) : text(std::to_string(value)) {}
 
+  void replace(const char *from, const char *to) {
+    size_t pos = 0; while ((pos = text.find(from, pos)) != std::string::npos) { text.replace(pos, strlen(from), to); pos += strlen(to); }
+  }
   const char *c_str() const { return text.c_str(); }
   int toInt() const { return atoi(text.c_str()); }
   float toFloat() const { return static_cast<float>(atof(text.c_str())); }
