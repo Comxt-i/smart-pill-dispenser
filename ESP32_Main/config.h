@@ -123,7 +123,7 @@ constexpr uint8_t CANCEL_BUTTON_PIN = 27;    // K1 ปุ่มแดง  = ข�
 // การเชื่อมต่อกับ server (ตั้งค่า SERVER_BASE_URL และ DEVICE_API_KEY ใน secrets.h)
 // ---------------------------------------------------------------------------
 
-constexpr char FIRMWARE_VERSION[] = "1.0.0";
+constexpr char FIRMWARE_VERSION[] = "1.1.0";
 
 // รอบการดึงตารางยาเมื่อไม่มีคำสั่งค้าง (server อาจสั่งให้ถี่ขึ้นผ่าน next_poll_sec)
 constexpr unsigned long SYNC_INTERVAL_MS = 60UL * 1000UL;

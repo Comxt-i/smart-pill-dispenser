@@ -1,3 +1,5 @@
+> Wi-Fi setup update: firmware 1.1.0 uses the QR/login + local setup portal. See [QR Wi-Fi setup](docs/QR_WIFI_SETUP.md). `WIFI_SSID`/`WIFI_PASSWORD` are legacy fields and are no longer used. Configure only the backend URL and per-device API key before flashing.
+
 # Smart Pill Dispenser
 
 โปรเจกต์กล่องยาสำหรับผู้สูงอายุแบบจานหมุน 3 ชุด ใช้ **ESP32 เพียงบอร์ดเดียว**

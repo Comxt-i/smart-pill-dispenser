@@ -41,6 +41,9 @@ class JsonAny {
   }
 
   template <typename T>
+  void add(const T &) {}
+
+  template <typename T>
   T operator|(T fallback) const {
     return fallback;
   }
