@@ -532,6 +532,30 @@ uint8_t buildRoundLines(int roundMinutes,
   return used;
 }
 
+/**
+ * หน้าจอโหมดตั้งค่า Wi-Fi
+ *
+ * แสดงชื่อและรหัสของ AP ที่เครื่องปล่อยเอง เพื่อให้ผู้ใช้จริงเชื่อมต่อได้
+ * โดยไม่ต้องต่อคอมพิวเตอร์ดู Serial — จอ 20x4 ใส่ได้ครบทั้งสี่บรรทัดพอดี
+ *
+ * บรรทัดไหนยาวเกินจอจะเลื่อนวนเองผ่าน lcdMedicineTick()
+ */
+void showSetupScreen()
+{
+  static char passLine[LCD_MARQUEE_MAX_TEXT];
+  snprintf(passLine, sizeof(passLine), "pw: %s", wifiSetupPassword());
+
+  const char *lines[LCD_MEDICINE_ROWS] = {
+      "WIFI SETUP MODE",
+      wifiSetupSsid(),
+      passLine,
+      "http://192.168.4.1",
+  };
+
+  // ส่ง 0 hint เพื่อให้บรรทัดสุดท้ายอยู่นิ่ง ผู้ใช้กำลังพิมพ์ตามอยู่ ไม่ควรให้ข้อความสลับไปมา
+  lcdSetMedicineScreen(lines, LCD_MEDICINE_ROWS, nullptr, 0);
+}
+
 void updateDisplay()
 {
   const bool online = WiFi.status() == WL_CONNECTED;
@@ -679,7 +703,15 @@ void appLoop()
   rtcLcdUpdate();
 
   // Setup is entered only at boot; preserve emergency buttons while configuring Wi-Fi.
-  if (wifiSetupActive()) { handleButtons(); lcdShowMessage("Wi-Fi Setup", "192.168.4.1"); return; }
+  if (wifiSetupActive())
+  {
+    handleButtons();
+    showSetupScreen();
+    // ต้องเรียกเองตรงนี้ เพราะบรรทัดนี้ return ก่อนถึงจุดที่เรียก lcdMedicineTick() ตามปกติ
+    // ถ้าไม่เรียก ข้อความที่ยาวเกินจอจะค้างไม่เลื่อน
+    lcdMedicineTick();
+    return;
+  }
 
   // ตารางยาของวันใหม่ต้องดึงใหม่ทันทีที่ข้ามเที่ยงคืน
   if (scheduleConsumeDayRollover())
