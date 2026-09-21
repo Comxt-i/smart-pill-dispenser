@@ -136,7 +136,7 @@ constexpr uint8_t CONFIRM_BUTTON_PIN = DISPENSE_BUTTON_PIN;
 // ข้อแลกเปลี่ยนของการกำหนดเอง: ทุกกล่องใช้รหัสเดียวกัน ใครรู้จากกล่องหนึ่งก็เข้าได้ทุกกล่อง
 // และคนที่อยู่บน AP เดียวกันดักรหัส Wi-Fi บ้านที่ผู้ใช้กำลังกรอกได้ เพราะหน้า setup เป็น HTTP
 // ยังมีรหัสตั้งค่าจากเว็บกั้นอีกชั้น การจับคู่จึงยังทำไม่ได้ถ้าไม่มีรหัสนั้น
-constexpr bool SETUP_AP_FIXED_CREDENTIALS = true;
+constexpr bool SETUP_AP_FIXED_CREDENTIALS = false;
 
 // ต้องไม่เกิน 31 ตัวอักษรตามข้อกำหนดของ SSID
 constexpr char SETUP_AP_SSID[] = "SmartPill_Setup";

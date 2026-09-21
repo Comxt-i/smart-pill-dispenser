@@ -7,12 +7,12 @@ This feature spans `embedded_project` (website/backend) and `smart-pill-dispense
 1. Scan the printed QR. It opens `https://YOUR-DOMAIN/setup/AA:BB:CC:DD:EE:FF` using the box’s registered station MAC. Old `/setup/DEVICE_ID` links still work.
 2. Register an account or log in while the phone still has internet. The website returns to that exact box. Click **สร้างรหัสตั้งค่า** to get a code valid for 15 minutes.
 3. Copy the code. It tells the ESP32 which logged-in account to pair with; it is not a Wi-Fi password. Paste it into the box’s local portal in step 5. Keep this tab open.
-4. Connect the phone to `SmartPill_Setup_XXXXXX`, using the setup-network password printed on the label. Select “stay connected” if the phone warns that the network has no internet.
+4. Connect the phone to `PillBox_XXXXXX`, using the setup-network password printed on the label. Select “stay connected” if the phone warns that the network has no internet.
 5. Open the captive portal, or type `http://192.168.4.1`. Select a 2.4 GHz home SSID, enter its password, paste the setup code and submit.
 6. The ESP32 connects to home Wi-Fi, verifies the code with the backend using its own hardware API key, then persists the credentials in its NVS. Invalid Wi-Fi or setup codes leave the portal available for correction.
 7. After success the box closes its setup Wi-Fi after ten seconds. Reconnect the phone to home Wi-Fi/mobile data and return to the website. The website waits for a new hardware sync before showing completion.
 
-Home Wi-Fi SSID/password travel only from the phone's local portal to the ESP32, never to the cloud API, QR URL, browser localStorage, or backend database. The AP is WPA-protected; its password is a device-specific HMAC derivation distinct from the hardware API key. The QR contains only a website URL and public device identifier.
+Home Wi-Fi SSID/password travel only from the phone's local portal to the ESP32, never to the cloud API, QR URL, browser localStorage, or backend database. With `SETUP_AP_FIXED_CREDENTIALS = false`, the AP is WPA-protected; its password is a device-specific HMAC derivation distinct from the hardware API key. Printed labels use this mode and the `PillBox_` SSID prefix. The QR contains only a website URL and public device identifier.
 
 ## สร้าง QR จากเครื่องมือภายนอก
 
@@ -24,7 +24,7 @@ https://YOUR-DOMAIN/setup/AA:BB:CC:DD:EE:FF
 
 แทน `YOUR-DOMAIN` ด้วยโดเมนเว็บจริง และแทน MAC ด้วย **station MAC** ของ ESP32 เครื่องนั้น (ตัวที่ลงทะเบียนกับ backend ไม่ใช่ SoftAP MAC) ใช้ตัวพิมพ์เล็กหรือใหญ่ได้ โดยต้องมีเครื่องหมาย `:` คั่นครบ 6 คู่
 
-หน้า **ฮาร์ดแวร์ ESP32 → พิมพ์ QR → คัดลอกลิงก์สร้าง QR** เตรียมลิงก์นี้ให้ได้เช่นกัน QR มีเฉพาะ URL และ MAC ไม่ต้องใส่รหัสผ่าน Wi-Fi บ้าน, API key หรือรหัสตั้งค่าชั่วคราวลงใน QR
+หน้าแอดมิน **จัดการกล่องทั้งหมด → พิมพ์ QR → คัดลอกลิงก์สร้าง QR** เตรียมลิงก์นี้ให้ได้เช่นกัน QR มีเฉพาะ URL และ MAC ไม่ต้องใส่รหัสผ่าน Wi-Fi บ้าน, API key หรือรหัสตั้งค่าชั่วคราวลงใน QR
 
 กล่องต้องลงทะเบียนในระบบและติดตั้ง API key เฉพาะเครื่องก่อน QR ไม่ได้ลงทะเบียนฮาร์ดแวร์ให้อัตโนมัติ เมื่อสแกนโดยยังไม่ login จะมีให้สมัครสมาชิกหรือเข้าสู่ระบบ แล้วกลับมาที่กล่องเดิม
 
@@ -36,10 +36,10 @@ A permanent hardware identity is still required once per physical board. This st
 
 1. Register the real station MAC and name via `POST /api/devices` using an ADMIN JWT. The API creates an unpaired device and returns its unique `api_key`. Duplicate MACs are rejected to prevent overwriting another device. Existing devices keep their current keys.
 2. Set `SERVER_BASE_URL` and this device's `DEVICE_API_KEY` in `ESP32_Main/secrets.h`, then flash the firmware. Keep servo movement disabled until separately calibrated, as before. Wi-Fi credentials no longer need to be compiled into that file.
-3. Log into the real hosted website as ADMIN, open Hardware ESP32 and click **พิมพ์ QR** on the device card. The label prints a QR, setup SSID/password and setup-button instructions. Generate the label on the final public HTTPS domain, not localhost.
+3. Log into the real hosted website as ADMIN, open **จัดการกล่องทั้งหมด** (`/admin/devices`) and click **พิมพ์ QR** on the device card. The label prints a QR, setup SSID/password and setup-button instructions. Generate the label on the final public HTTPS domain, not localhost.
 4. Print at 100%, without cropping the white border around the QR; test a physical scan before attaching it to the box. The application generates QR locally, with no external QR service.
 
-Normal accounts can print labels for their paired devices; only ADMIN can print an unpaired label. A box already paired to another account cannot be claimed through a copied QR. Physical possession of the AP password does not replace login authorization.
+Only ADMIN accounts can print labels, for both paired and unpaired devices. Normal accounts see only their own devices and cannot access the label page or label API. Administrators can register devices, rename them, see every owner/status, and unpair a device from its current owner through `/admin/devices`. Printing does not change ownership. A box already paired to another account cannot be claimed through a copied QR. Physical possession of the AP password does not replace login authorization.
 
 ## Changing Wi-Fi and unpairing
 
