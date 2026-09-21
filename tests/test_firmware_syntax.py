@@ -17,12 +17,15 @@ SOURCES = [
     ("ESP32_Main", "buttons.cpp"),
     ("ESP32_Main", "dispenser_control.cpp"),
     ("ESP32_Main", "event_queue.cpp"),
+    ("ESP32_Main", "marquee.cpp"),
     ("ESP32_Main", "net_sync.cpp"),
     ("ESP32_Main", "pill_app.cpp"),
     ("ESP32_Main", "rtc_lcd.cpp"),
     ("ESP32_Main", "schedule_store.cpp"),
     ("ESP32_Main", "wifi_web.cpp"),
     ("examples/TestDispenseEvent", "TestDispenseEvent.ino"),
+    # sketch นี้แยกสาขาตามบอร์ด ต้องบอกให้ชัดว่าตรวจสาขาของ ESP32
+    ("examples/TwoPlateDispense", "TwoPlateDispense.ino", ["-DESP32"]),
 ]
 
 
@@ -31,7 +34,9 @@ class FirmwareSyntaxTest(unittest.TestCase):
         compiler = shutil.which("c++")
         self.assertIsNotNone(compiler, "Install a C++ compiler to run these tests")
 
-        for folder, name in SOURCES:
+        for source in SOURCES:
+            folder, name = source[0], source[1]
+            extra_flags = source[2] if len(source) > 2 else []
             with self.subTest(source="%s/%s" % (folder, name)):
                 command = [
                     compiler,
@@ -51,6 +56,7 @@ class FirmwareSyntaxTest(unittest.TestCase):
                 if name.endswith(".ino"):
                     command += ["-x", "c++"]
 
+                command += extra_flags
                 command.append(str(ROOT / folder / name))
 
                 result = subprocess.run(

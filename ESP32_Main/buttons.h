@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 
-enum class ButtonId : uint8_t { Dispense, Confirm, Cancel, Count };
+enum class ButtonId : uint8_t { Dispense, Snooze, Cancel, Count };
 
 /** ตั้ง pinMode ให้ทุกปุ่มเป็น INPUT_PULLUP (ปุ่มต่อลง GND) */
 void buttonsBegin();

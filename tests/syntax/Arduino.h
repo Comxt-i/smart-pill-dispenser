@@ -19,6 +19,7 @@ constexpr int INPUT_PULLUP = 2;
 
 unsigned long millis();
 void delay(unsigned long ms);
+void delayMicroseconds(unsigned int us);
 void pinMode(uint8_t pin, uint8_t mode);
 int digitalRead(uint8_t pin);
 void digitalWrite(uint8_t pin, int value);
@@ -89,3 +90,17 @@ class EspClass {
 };
 
 extern EspClass ESP;
+
+void analogWrite(uint8_t pin, int value);
+long map(long x, long inMin, long inMax, long outMin, long outMax);
+
+// ของจริงเป็นมาโคร แต่เทมเพลตพอสำหรับตรวจไวยากรณ์และปลอดภัยกว่า
+template <typename T>
+T constrain(T value, T low, T high) {
+  return value < low ? low : (value > high ? high : value);
+}
+
+// ของจริงย้ายสตริงไป flash; บนเครื่องคอมพิวเตอร์ปล่อยผ่านได้เลย
+#define F(string_literal) (string_literal)
+
+constexpr uint8_t LED_BUILTIN = 13;

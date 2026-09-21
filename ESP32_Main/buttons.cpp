@@ -6,7 +6,7 @@ constexpr uint8_t BUTTON_COUNT = static_cast<uint8_t>(ButtonId::Count);
 
 const uint8_t BUTTON_PINS[BUTTON_COUNT] = {
   DISPENSE_BUTTON_PIN,
-  CONFIRM_BUTTON_PIN,
+  SNOOZE_BUTTON_PIN,
   CANCEL_BUTTON_PIN,
 };
 

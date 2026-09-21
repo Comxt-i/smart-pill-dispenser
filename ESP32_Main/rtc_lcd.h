@@ -4,6 +4,41 @@
 
 void rtcLcdBegin();
 
+/**
+ * สแกนบัส I2C แล้วรายงานว่าพบอุปกรณ์ที่คาดหวังครบไหม
+ *
+ * ถ้า address ของ LCD หรือ RTC ไม่ตรงกับที่ตั้งไว้ จอจะดับเงียบๆ โดยไม่มี error
+ * การสแกนตอนบูตทำให้รู้ทันทีว่าสายหลุดหรือ address ผิด แทนที่จะไปนั่งเดา
+ *
+ * คืน false เมื่อมีอุปกรณ์ที่คาดหวังหายไปอย่างน้อยหนึ่งตัว
+ */
+bool i2cScanAndReport();
+
+/** จำนวน address ที่เจอตอนสแกนล่าสุด */
+uint8_t i2cFoundCount();
+
+/** address ลำดับที่ index ที่เจอตอนสแกนล่าสุด */
+uint8_t i2cFoundAddress(uint8_t index);
+
+/**
+ * สภาพของเส้น SDA/SCL ตอนว่าง ใช้แทนการวัดด้วยมัลติมิเตอร์
+ *
+ * I2C ที่ปกติต้องถูก pull-up ขึ้นเป็น HIGH ทั้งสองเส้นตอนไม่มีใครใช้บัส
+ * ถ้าอ่านได้ LOW แปลว่าไม่มี pull-up หรือสายลัดลง GND ซึ่งทำให้สแกนไม่เจออะไรเลย
+ */
+struct I2cLineState {
+  bool sdaHighWithoutPullup;  // มี pull-up ภายนอกไหม
+  bool sclHighWithoutPullup;
+  bool sdaHighWithPullup;     // ขาใช้งานได้ไหม (ไม่ได้ลัดลง GND)
+  bool sclHighWithPullup;
+};
+
+/** ตรวจสภาพเส้นสัญญาณ ต้องเรียกก่อน Wire.begin() เท่านั้น */
+I2cLineState i2cCheckLines();
+
+/** ผลตรวจครั้งล่าสุด ใช้แสดงบนหน้าเว็บ */
+I2cLineState i2cLastLineState();
+
 /** รีเฟรชจอเวลาทุก 1 วินาที ต้องเรียกทุกรอบ loop */
 void rtcLcdUpdate();
 
@@ -25,15 +60,27 @@ uint32_t rtcDayKey();
 uint32_t rtcLocalEpoch();
 
 // ---- จอที่สอง: ยาและมื้อถัดไป ----
+//
+// บรรทัดบนคือชื่อยา ถ้ายาวเกิน 16 ตัวอักษรจะเลื่อนวนให้อ่านครบ
+// บรรทัดล่างสลับไปมาระหว่างข้อมูลมื้อยากับคำแนะนำว่าปุ่มไหนทำอะไร
+// ทั้งสองอย่างเดินด้วย lcdMedicineTick() ซึ่งต้องเรียกทุกรอบ loop
 
-/** ข้อความสองบรรทัดทั่วไป ใช้กับสถานะระหว่างทำงาน */
+/**
+ * ตั้งสิ่งที่จะแสดงบนจอยา
+ *
+ * lines  ข้อความของแต่ละบรรทัดไล่จากบนลงล่าง แต่ละบรรทัดเลื่อนวนเองถ้ายาวเกินจอ
+ * hints  ข้อความที่สลับกันแสดงบน **บรรทัดสุดท้าย** ของจอ
+ *        ส่ง 0 ถ้าไม่ต้องการให้บรรทัดสุดท้ายสลับ
+ *
+ * เรียกซ้ำด้วยค่าเดิมได้ทุกรอบ loop โดยภาพจะไม่กระตุก
+ */
+void lcdSetMedicineScreen(const char *const *lines,
+                          uint8_t lineCount,
+                          const char *const *hints,
+                          uint8_t hintCount);
+
+/** รูปแบบย่อสำหรับข้อความสองบรรทัด (บรรทัดที่เหลือจะถูกล้าง) */
 void lcdShowMessage(const char *line1, const char *line2);
 
-/** มื้อถัดไปของวันนี้ */
-void lcdShowNextDose(const char *medicineName, int minutes);
-
-/** กำลังเตือนให้ผู้ใช้กดปุ่มรับยา */
-void lcdShowAlert(const char *medicineName, float amount, int minutes);
-
-/** ไม่มีมื้อยาเหลือในวันนี้ */
-void lcdShowIdle(bool online);
+/** ขยับข้อความเลื่อนและสลับบรรทัดล่าง ต้องเรียกทุกรอบ loop */
+void lcdMedicineTick();

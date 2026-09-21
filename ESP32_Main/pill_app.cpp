@@ -70,8 +70,18 @@ void reportDose(const DoseRef &ref, const char *status, const char *note)
   fillEvent(event, status);
   strncpy(event.scheduleId, dose->scheduleId, sizeof(event.scheduleId) - 1);
   strncpy(event.medicationId, slot->medicationId, sizeof(event.medicationId) - 1);
-  if (note)
+
+  // แนบจำนวนครั้งที่ผู้ใช้กดเลื่อนไปกับผลสุดท้าย เพื่อให้ผู้ดูแลเห็นว่ามื้อนี้ถูกผัดไปกี่รอบ
+  // โดยไม่ต้องสร้างประวัติแยกสำหรับการเลื่อนแต่ละครั้ง
+  // ต้องเป็น ASCII และไม่เกิน 31 ไบต์ ตามข้อจำกัดของ PendingEvent::note
+  const uint8_t snoozes = dose->snoozeCount;
+  if (snoozes > 0 && note)
+    snprintf(event.note, sizeof(event.note), "%.18s, snoozed %ux", note, snoozes);
+  else if (snoozes > 0)
+    snprintf(event.note, sizeof(event.note), "snoozed %ux", snoozes);
+  else if (note)
     strncpy(event.note, note, sizeof(event.note) - 1);
+
   event.slot = slot->number;
   event.amount = slot->amountPerDose;
 
@@ -121,18 +131,22 @@ void onDoseStateChanged(const DoseRef &ref, DoseState previous, DoseState next)
 // การจ่ายยา
 // ---------------------------------------------------------------------------
 
-uint8_t cyclesFor(float amount)
+/**
+ * แปลงจำนวนเม็ดจากตารางยา (เป็นทศนิยมได้ เช่น 0.5 เม็ด) เป็นจำนวนเม็ดที่สั่งจ่ายจริง
+ *
+ * กลไกจ่ายได้ทีละเม็ดเต็มเท่านั้น จึงปัดขึ้น แล้วคุมไม่ให้เกินเพดาน
+ */
+uint8_t pillsFor(float amount)
 {
   if (amount <= 0)
     return 1;
 
-  const float raw = amount / PILLS_PER_CYCLE;
-  int cycles = static_cast<int>(ceilf(raw));
-  if (cycles < 1)
-    cycles = 1;
-  if (cycles > MAX_CYCLES_PER_DOSE)
-    cycles = MAX_CYCLES_PER_DOSE;
-  return static_cast<uint8_t>(cycles);
+  int pills = static_cast<int>(ceilf(amount));
+  if (pills < 1)
+    pills = 1;
+  if (pills > MAX_PILLS_PER_DOSE)
+    pills = MAX_PILLS_PER_DOSE;
+  return static_cast<uint8_t>(pills);
 }
 
 void showNotice(const char *text)
@@ -186,7 +200,21 @@ void startDoseDispense(const DoseRef &ref)
   if (!slot || !dose)
     return;
 
-  const DispenseResult result = dispenseMedicine(slot->number, cyclesFor(slot->amountPerDose));
+  const DispenseResult result = dispenseMedicine(slot->number, pillsFor(slot->amountPerDose));
+
+  // โหมดทดสอบตอนที่ยังไม่ได้ต่อ Servo: ปิดมื้อนี้ให้เรียบร้อยเหมือนจ่ายสำเร็จ
+  // แต่ติดป้าย "dry run" ไว้ในบันทึก เพื่อไม่ให้ประวัติหลอกว่าเม็ดยาออกมาจริง
+  if (result == DispenseResult::Disabled && DISPENSE_DRY_RUN)
+  {
+    Serial.printf("[จ่ายยา] ช่อง %u โหมดทดสอบ ไม่ได้ขยับ Servo\n", slot->number);
+    alertOneShot(AlertPattern::Success);
+    showNotice("DRY RUN OK");
+    reportDose(ref, "DISPENSED", "dry run");
+    // ตั้งสถานะตรงๆ เพื่อไม่ให้ callback ส่ง DISPENSED ซ้ำอีกใบ
+    dose->state = DoseState::Done;
+    return;
+  }
+
   if (result != DispenseResult::Started)
   {
     Serial.printf("[จ่ายยา] ช่อง %u ไม่สำเร็จ: %s\n", slot->number, describe(result));
@@ -212,7 +240,7 @@ void startDoseDispense(const DoseRef &ref)
 
 void startCommandDispense(const RemoteCommand &command)
 {
-  const DispenseResult result = dispenseMedicine(command.slot, cyclesFor(command.amount));
+  const DispenseResult result = dispenseMedicine(command.slot, pillsFor(command.amount));
   if (result != DispenseResult::Started)
   {
     Serial.printf("[คำสั่ง] ช่อง %u ไม่สำเร็จ: %s\n", command.slot, describe(result));
@@ -233,15 +261,21 @@ void handleDispenseOutcome()
   if (!takeDispenseOutcome(outcome))
     return;
 
-  const bool complete = !outcome.cancelled && outcome.completedCycles >= outcome.requestedCycles;
+  const bool complete = !outcome.cancelled && outcome.dispensedPills >= outcome.requestedPills;
   const RunOwner owner = runOwner;
   runOwner = RunOwner::None;
 
-  Serial.printf("[จ่ายยา] ช่อง %u หมุน %u/%u รอบ%s\n",
+  // ไม่ได้ตรวจด้วย IR = รู้แค่ว่าสั่งหมุนไปแล้ว ยืนยันไม่ได้ว่าเม็ดยาออกมาจริง
+  // ต้องติดป้ายไว้ในบันทึก เพื่อไม่ให้ประวัติหลอกว่ายืนยันแล้ว
+  const char *const unverified = outcome.sensorVerified ? nullptr : "unverified";
+
+  Serial.printf("[จ่ายยา] ช่อง %u ได้ %u/%u เม็ด (หมุน %u รอบ)%s%s\n",
                 outcome.dispenser,
-                outcome.completedCycles,
-                outcome.requestedCycles,
-                outcome.cancelled ? " (ถูกยกเลิก)" : "");
+                outcome.dispensedPills,
+                outcome.requestedPills,
+                outcome.attempts,
+                outcome.cancelled ? " (ถูกยกเลิก)" : "",
+                outcome.sensorVerified ? "" : " (ไม่ได้ตรวจด้วย IR)");
 
   if (owner == RunOwner::Dose)
   {
@@ -260,7 +294,18 @@ void handleDispenseOutcome()
     {
       alertOneShot(AlertPattern::Success);
       showNotice("TAKE YOUR PILLS");
-      scheduleSetState(ref, DoseState::Done);  // callback จะส่ง DISPENSED ให้เอง
+      if (unverified)
+      {
+        // ต้องแนบหมายเหตุ แต่ onDoseStateChanged ส่ง DISPENSED แบบไม่มีหมายเหตุ
+        // จึงรายงานเองแล้วตั้งสถานะตรงๆ เพื่อไม่ให้ callback ส่งซ้ำอีกใบ
+        // (แพตเทิร์นเดียวกับเส้นทาง dry run ด้านบน)
+        reportDose(ref, "DISPENSED", unverified);
+        dose->state = DoseState::Done;
+      }
+      else
+      {
+        scheduleSetState(ref, DoseState::Done);  // callback จะส่ง DISPENSED ให้เอง
+      }
     }
     else
     {
@@ -271,7 +316,7 @@ void handleDispenseOutcome()
       if (!dose->failureReported)
       {
         dose->failureReported = true;
-        reportDose(ref, "FAILED", "incomplete cycles");
+        reportDose(ref, "FAILED", "not enough pills");
       }
     }
     return;
@@ -282,7 +327,7 @@ void handleDispenseOutcome()
     alertOneShot(complete ? AlertPattern::Success : AlertPattern::Warning);
     reportCommand(runningCommand,
                   complete ? "DISPENSED" : "FAILED",
-                  complete ? nullptr : "incomplete cycles");
+                  complete ? unverified : "not enough pills");
   }
 }
 
@@ -309,14 +354,24 @@ void handleButtons()
     }
   }
 
-  if (buttonPressed(ButtonId::Confirm))
+  if (buttonPressed(ButtonId::Snooze))
   {
     if (alerting)
     {
-      // ผู้ใช้ทานยาเองจากซองแล้ว ปิดการเตือนและบันทึกว่ามื้อนี้เรียบร้อย
-      alertOneShot(AlertPattern::Success);
-      showNotice("CONFIRMED");
-      scheduleSetState(activeAlert, DoseState::Done);
+      // ปุ่มเหลือง: ยังไม่สะดวกตอนนี้ ขอเลื่อนไปอีก SNOOZE_MINUTES นาที
+      if (scheduleSnooze(activeAlert, rtcMinutesOfDay()))
+      {
+        alertOneShot(AlertPattern::Click);
+        char notice[24];
+        snprintf(notice, sizeof(notice), "SNOOZE %d MIN", SNOOZE_MINUTES);
+        showNotice(notice);
+      }
+      else
+      {
+        // เลื่อนครบโควตาแล้ว หรือเลื่อนต่อจะเลยเวลาผ่อนผัน
+        alertOneShot(AlertPattern::Warning);
+        showNotice("CANNOT SNOOZE");
+      }
     }
     else
     {
@@ -357,11 +412,134 @@ void handleButtons()
 // จอและเสียง
 // ---------------------------------------------------------------------------
 
+/** จำนวนเม็ดแบบอ่านง่าย: 2 ไม่ใช่ 2.0 */
+void formatAmount(float amount, char *out, size_t size)
+{
+  if (amount == static_cast<int>(amount))
+    snprintf(out, size, "%d", static_cast<int>(amount));
+  else
+    snprintf(out, size, "%.1f", static_cast<double>(amount));
+}
+
+/**
+ * หาเวลาของ "รอบถัดไป" คือมื้อที่ใกล้ที่สุดที่ยังไม่ได้จัดการ
+ *
+ * ใช้เวลาที่คิดการเลื่อนแล้ว (doseEffectiveMinutes) ไม่ใช่เวลาตามตาราง
+ * ถ้าใช้เวลาตามตาราง มื้อที่ถูกเลื่อนไปทับรอบถัดไปจะถูกจัดลำดับผิด
+ *
+ * คืน -1 เมื่อจัดการครบทุกมื้อแล้ววันนี้
+ */
+int nextRoundMinutes()
+{
+  int soonest = -1;
+
+  for (uint8_t s = 0; s < scheduleSlotCount(); ++s)
+  {
+    const Slot &slot = scheduleSlot(s);
+    if (!slot.active || slot.medicationId[0] == '\0')
+      continue;
+
+    for (uint8_t d = 0; d < slot.doseCount; ++d)
+    {
+      const Dose &dose = slot.doses[d];
+      if (!doseIsOpen(dose))
+        continue;
+
+      const int when = doseEffectiveMinutes(dose);
+      if (soonest < 0 || when < soonest)
+        soonest = when;
+    }
+  }
+
+  return soonest;
+}
+
+/**
+ * สร้างบรรทัดของยาที่ต้องกิน โดยแสดงทีละรอบ
+ *
+ * ปกติจะแสดงเฉพาะยาที่มีเวลาตรงกับ roundMinutes
+ * แต่ถ้ามีมื้อที่ถึงเวลาแล้ว (เช่นผู้ใช้กดเลื่อนจนไปทับรอบถัดไป) จะแสดง
+ * **ทุกมื้อที่ถึงเวลาแล้วพร้อมกัน** เพราะผู้ใช้ต้องจัดการทั้งหมด ไม่ใช่เห็นทีละตัว
+ *
+ * คืนจำนวนบรรทัดที่สร้างได้ และตั้ง anyDueNow ว่ามีมื้อที่ถึงเวลาแล้วหรือไม่
+ */
+uint8_t buildRoundLines(int roundMinutes,
+                        int nowMinutes,
+                        char buffer[][LCD_MARQUEE_MAX_TEXT],
+                        uint8_t maxLines,
+                        bool &anyDueNow)
+{
+  uint8_t used = 0;
+  anyDueNow = false;
+  if (roundMinutes < 0)
+    return 0;
+
+  // รอบแรก: ดูว่ามีมื้อที่ถึงเวลาแล้วไหม
+  for (uint8_t s = 0; s < scheduleSlotCount() && !anyDueNow; ++s)
+  {
+    const Slot &slot = scheduleSlot(s);
+    if (!slot.active || slot.medicationId[0] == '\0')
+      continue;
+    for (uint8_t d = 0; d < slot.doseCount; ++d)
+    {
+      const Dose &dose = slot.doses[d];
+      if (doseIsOpen(dose) && doseEffectiveMinutes(dose) <= nowMinutes)
+      {
+        anyDueNow = true;
+        break;
+      }
+    }
+  }
+
+  for (uint8_t s = 0; s < scheduleSlotCount() && used < maxLines; ++s)
+  {
+    const Slot &slot = scheduleSlot(s);
+    if (!slot.active || slot.medicationId[0] == '\0')
+      continue;
+
+    for (uint8_t d = 0; d < slot.doseCount && used < maxLines; ++d)
+    {
+      const Dose &dose = slot.doses[d];
+      if (!doseIsOpen(dose))
+        continue;
+
+      const int when = doseEffectiveMinutes(dose);
+
+      // มีของถึงเวลาแล้ว -> โชว์ทุกอันที่ถึงเวลา (อาจข้ามรอบได้)
+      // ยังไม่ถึงเวลา -> โชว์เฉพาะรอบที่ใกล้ที่สุด
+      if (anyDueNow ? when > nowMinutes : when != roundMinutes)
+        continue;
+
+      const char *mark = "";
+      if (dose.state == DoseState::Alerting)
+        mark = " <<";
+      else if (dose.state == DoseState::Snoozed)
+        mark = " ZZZ";
+
+      char amount[8];
+      formatAmount(slot.amountPerDose, amount, sizeof(amount));
+      snprintf(buffer[used],
+               LCD_MARQUEE_MAX_TEXT,
+               "%u %s x%s%s",
+               slot.number,
+               slot.name,
+               amount,
+               mark);
+      ++used;
+    }
+  }
+
+  return used;
+}
+
 void updateDisplay()
 {
+  const bool online = WiFi.status() == WL_CONNECTED;
+
+  // ข้อความตอบรับการกดปุ่ม แสดงสั้นๆ แล้วกลับไปหน้าปกติ
   if (static_cast<long>(noticeUntilMs - millis()) > 0 && lastNotice[0] != '\0')
   {
-    lcdShowMessage(lastNotice, WiFi.status() == WL_CONNECTED ? "Online" : "Offline");
+    lcdShowMessage(lastNotice, "");
     return;
   }
 
@@ -371,36 +549,101 @@ void updateDisplay()
     return;
   }
 
-  const Dose *alertDose = scheduleDoseAt(activeAlert);
-  if (alertDose && alertDose->state == DoseState::Alerting)
-  {
-    const Slot *slot = scheduleSlotOf(activeAlert);
-    lcdShowAlert(slot ? slot->name : "Medicine", slot ? slot->amountPerDose : 1.0f, alertDose->minutes);
-    return;
-  }
-
   if (!rtcIsValid())
   {
-    lcdShowMessage("Clock not set", WiFi.status() == WL_CONNECTED ? "Syncing..." : "No Wi-Fi");
+    lcdShowMessage("Clock not set", online ? "Syncing..." : "No Wi-Fi");
     return;
   }
 
   if (!scheduleHasData())
   {
-    lcdShowMessage("Waiting sync", WiFi.status() == WL_CONNECTED ? "Online" : "No Wi-Fi");
+    lcdShowMessage("No schedule yet", online ? "Contacting server" : "No Wi-Fi");
     return;
   }
 
-  const DoseRef next = scheduleNextUpcoming(rtcMinutesOfDay());
-  const Dose *nextDose = scheduleDoseAt(next);
-  if (nextDose)
+  // ---- บรรทัดบน: ยาของ "รอบถัดไป" รอบเดียว บรรทัดละ 1 ช่อง ----
+  // บรรทัดสุดท้ายสงวนไว้ให้เวลา/คำแนะนำปุ่ม
+  constexpr uint8_t SLOT_LINES = LCD_MEDICINE_ROWS - 1;
+  static char slotText[SLOT_LINES][LCD_MARQUEE_MAX_TEXT];
+  const int nowMinutes = rtcMinutesOfDay();
+  const int roundMinutes = nextRoundMinutes();
+  bool anyDueNow = false;
+  const uint8_t slotLines =
+      buildRoundLines(roundMinutes, nowMinutes, slotText, SLOT_LINES, anyDueNow);
+
+  const char *lines[LCD_MEDICINE_ROWS] = {};
+  for (uint8_t i = 0; i < slotLines; ++i)
+    lines[i] = slotText[i];
+  for (uint8_t i = slotLines; i < LCD_MEDICINE_ROWS; ++i)
+    lines[i] = "";
+
+  // ---- บรรทัดสุดท้าย ----
+  const Dose *alertDose = scheduleDoseAt(activeAlert);
+  const bool alerting = alertDose && alertDose->state == DoseState::Alerting;
+
+  char hintA[LCD_MAX_COLS + 1];
+  char hintB[LCD_MAX_COLS + 1];
+  char hintC[LCD_MAX_COLS + 1];
+
+  if (alerting)
   {
-    const Slot *slot = scheduleSlotOf(next);
-    lcdShowNextDose(slot ? slot->name : "Medicine", nextDose->minutes);
+    // กำลังเตือน: บอกว่าถึงเวลาของช่องไหน แล้วสลับบอกว่าปุ่มไหนทำอะไร
+    const Slot *slot = scheduleSlotOf(activeAlert);
+    snprintf(hintA, sizeof(hintA), "NOW %02d:%02d  slot %u",
+             alertDose->minutes / 60, alertDose->minutes % 60,
+             slot ? slot->number : 0);
+    snprintf(hintB, sizeof(hintB), "GREEN = TAKE NOW");
+
+    if (scheduleSnoozeCount(activeAlert) >= MAX_SNOOZE_PER_DOSE)
+      snprintf(hintC, sizeof(hintC), "RED = SKIP DOSE");
+    else
+      snprintf(hintC, sizeof(hintC), "YEL +%dmin  RED skip", SNOOZE_MINUTES);
+
+    const char *hints[3] = {hintA, hintB, hintC};
+    lcdSetMedicineScreen(lines, LCD_MEDICINE_ROWS, hints, 3);
     return;
   }
 
-  lcdShowIdle(WiFi.status() == WL_CONNECTED);
+  const DoseRef snoozed = scheduleFirstSnoozed();
+  const Dose *snoozedDose = scheduleDoseAt(snoozed);
+  if (snoozedDose)
+  {
+    snprintf(hintA, sizeof(hintA), "Snooze back %02d:%02d",
+             snoozedDose->snoozedUntil / 60, snoozedDose->snoozedUntil % 60);
+    snprintf(hintB, sizeof(hintB), "Snoozed %u of %u",
+             static_cast<unsigned>(snoozedDose->snoozeCount),
+             static_cast<unsigned>(MAX_SNOOZE_PER_DOSE));
+    const char *hints[2] = {hintA, hintB};
+    lcdSetMedicineScreen(lines, LCD_MEDICINE_ROWS, hints, 2);
+    return;
+  }
+
+  // ---- ว่าง: บรรทัดสุดท้ายบอกเวลาของรอบถัดไป ----
+  //
+  // ตอนทุกอย่างปกติให้แสดงบรรทัดเดียวนิ่งๆ ไม่ต้องสลับ
+  // การสลับข้อความที่ไม่ได้บอกอะไรใหม่ทำให้จอกวนตาเปล่าๆ
+  // จะเพิ่มบรรทัดสลับเฉพาะตอนมีเรื่องที่ผู้ใช้ควรรู้จริงๆ เช่นเน็ตหลุด
+  if (roundMinutes >= 0)
+    snprintf(hintA, sizeof(hintA), "Next %02d:%02d  %u item%s",
+             roundMinutes / 60,
+             roundMinutes % 60,
+             static_cast<unsigned>(slotLines),
+             slotLines == 1 ? "" : "s");
+  else
+    snprintf(hintA, sizeof(hintA), "All done today");
+
+  if (online)
+  {
+    const char *hints[1] = {hintA};
+    lcdSetMedicineScreen(lines, LCD_MEDICINE_ROWS, hints, 1);
+  }
+  else
+  {
+    // ออฟไลน์ = ตารางอาจไม่ตรงกับที่ตั้งไว้บนเว็บ ผู้ใช้ควรรู้
+    snprintf(hintB, sizeof(hintB), "OFFLINE - no sync");
+    const char *hints[2] = {hintA, hintB};
+    lcdSetMedicineScreen(lines, LCD_MEDICINE_ROWS, hints, 2);
+  }
 }
 
 void updateBuzzer()
@@ -503,6 +746,7 @@ void appLoop()
   updateBuzzer();
   alertUpdate();
   updateDisplay();
+  lcdMedicineTick();  // ขยับข้อความเลื่อนและสลับบรรทัดล่าง
 }
 
 const char *appManualDispense(uint8_t slotNumber, float amount, int &httpStatus)
@@ -522,7 +766,7 @@ const char *appManualDispense(uint8_t slotNumber, float amount, int &httpStatus)
   }
 
   const float requested = amount > 0 ? amount : slot.amountPerDose;
-  const DispenseResult result = dispenseMedicine(slotNumber, cyclesFor(requested));
+  const DispenseResult result = dispenseMedicine(slotNumber, pillsFor(requested));
   if (result != DispenseResult::Started)
   {
     httpStatus = result == DispenseResult::Busy || result == DispenseResult::Cancelled ? 409 : 503;
@@ -557,6 +801,40 @@ void appStatusJson(String &out)
   out += "\"sync_error\":\"" + String(netSyncLastError()) + "\",";
   out += "\"config_version\":\"" + String(netSyncConfigVersion()) + "\",";
   out += "\"pending_events\":" + String(eventQueueSize()) + ",";
+
+  // รายการ address ที่เจอบนบัส I2C ใช้ไล่ปัญหาจอไม่ขึ้นโดยไม่ต้องเสียบ USB
+  out += "\"i2c_found\":[";
+  for (uint8_t i = 0; i < i2cFoundCount(); ++i)
+  {
+    char hex[8];
+    snprintf(hex, sizeof(hex), "\"0x%02X\"", i2cFoundAddress(i));
+    if (i > 0)
+      out += ",";
+    out += hex;
+  }
+  out += "],";
+  {
+    const I2cLineState lines = i2cLastLineState();
+    char diag[160];
+    snprintf(diag,
+             sizeof(diag),
+             "\"i2c_lines\":{\"sda_pullup_ext\":%s,\"scl_pullup_ext\":%s,"
+             "\"sda_ok\":%s,\"scl_ok\":%s},",
+             lines.sdaHighWithoutPullup ? "true" : "false",
+             lines.sclHighWithoutPullup ? "true" : "false",
+             lines.sdaHighWithPullup ? "true" : "false",
+             lines.sclHighWithPullup ? "true" : "false");
+    out += diag;
+  }
+  {
+    char expected[48];
+    snprintf(expected,
+             sizeof(expected),
+             "\"i2c_expected\":[\"0x%02X\",\"0x%02X\",\"0x68\"],",
+             LCD_TIME_ADDRESS,
+             LCD_MEDICINE_ADDRESS);
+    out += expected;
+  }
   out += "\"slots\":[";
 
   for (uint8_t i = 0; i < scheduleSlotCount(); ++i)

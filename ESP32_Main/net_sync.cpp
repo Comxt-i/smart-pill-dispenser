@@ -276,9 +276,16 @@ bool netSyncFetch()
     return false;
   }
 
-  JsonDocument doc;
-  const DeserializationError error = deserializeJson(doc, http.getStream());
+  // อ่าน body ให้ครบเป็น String ก่อนแล้วค่อย parse
+  //
+  // ห้าม parse จาก http.getStream() ตรงๆ เพราะเมื่อ payload โตขึ้น (มียาหลายช่อง)
+  // ข้อมูลจะมาเป็นหลายก้อนผ่าน TLS แล้ว ArduinoJson จะเจอสตรีมขาดกลางคัน
+  // แล้วคืน IncompleteInput ทั้งที่ server ส่งมาครบ
+  const String body = http.getString();
   http.end();
+
+  JsonDocument doc;
+  const DeserializationError error = deserializeJson(doc, body);
 
   if (error)
   {
@@ -427,9 +434,12 @@ bool netSyncFlushEvents()
     return false;
   }
 
-  JsonDocument response;
-  const DeserializationError error = deserializeJson(response, http.getStream());
+  // อ่านให้ครบก่อนแล้วค่อย parse ด้วยเหตุผลเดียวกับใน netSyncFetch()
+  const String reply = http.getString();
   http.end();
+
+  JsonDocument response;
+  const DeserializationError error = deserializeJson(response, reply);
 
   if (error)
   {

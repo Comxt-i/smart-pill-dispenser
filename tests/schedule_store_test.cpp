@@ -279,6 +279,226 @@ void testLimitsAreRespected()
   assert(scheduleSlotCount() == DISPENSER_COUNT);
 }
 
+
+void testSnoozeDelaysAlert()
+{
+  resetStore();
+  stageStandardSchedule();
+
+  // 08:00 เริ่มเตือน
+  DoseRef alerting = scheduleTick(8 * 60, DAY_ONE, false);
+  assert(alerting.valid);
+  assert(stateOf("sch-morning") == DoseState::Alerting);
+
+  // กดเลื่อน -> หยุดเตือนทันที
+  assert(scheduleSnooze(alerting, 8 * 60));
+  assert(stateOf("sch-morning") == DoseState::Snoozed);
+  assert(scheduleSnoozeCount(scheduleFindByScheduleId("sch-morning")) == 1);
+
+  // ระหว่างที่เลื่อนอยู่ ต้องไม่ถูกเลือกมาเตือน (ไม่มีเสียง)
+  alerting = scheduleTick(8 * 60 + SNOOZE_MINUTES - 1, DAY_ONE, false);
+  assert(!alerting.valid);
+  assert(stateOf("sch-morning") == DoseState::Snoozed);
+
+  // ครบเวลาแล้วกลับมาเตือนเอง
+  alerting = scheduleTick(8 * 60 + SNOOZE_MINUTES, DAY_ONE, false);
+  assert(alerting.valid);
+  assert(strcmp(scheduleDoseAt(alerting)->scheduleId, "sch-morning") == 0);
+  assert(stateOf("sch-morning") == DoseState::Alerting);
+}
+
+void testSnoozeHasQuota()
+{
+  resetStore();
+  stageStandardSchedule();
+
+  int now = 8 * 60;
+  scheduleTick(now, DAY_ONE, false);
+
+  // เลื่อนได้จนครบโควตา
+  for (int i = 0; i < MAX_SNOOZE_PER_DOSE; ++i)
+  {
+    const DoseRef ref = scheduleFindByScheduleId("sch-morning");
+    assert(scheduleSnooze(ref, now));
+    now += SNOOZE_MINUTES;
+    scheduleTick(now, DAY_ONE, false);  // ตื่นกลับมาเตือนอีกครั้ง
+  }
+
+  // ครั้งถัดไปต้องถูกปฏิเสธ และยังคงเตือนอยู่เหมือนเดิม
+  const DoseRef ref = scheduleFindByScheduleId("sch-morning");
+  assert(scheduleSnoozeCount(ref) == MAX_SNOOZE_PER_DOSE);
+  assert(!scheduleSnooze(ref, now));
+  assert(stateOf("sch-morning") == DoseState::Alerting);
+}
+
+void testSnoozeCannotCrossGracePeriod()
+{
+  resetStore();
+  stageStandardSchedule();
+
+  // เข้าใกล้เส้นตายมากจนเลื่อนไปก็จะตื่นหลังหมดเวลาผ่อนผัน
+  const int nearDeadline = 8 * 60 + ALERT_TIMEOUT_MINUTES - (SNOOZE_MINUTES - 1);
+  scheduleTick(nearDeadline, DAY_ONE, false);
+  assert(stateOf("sch-morning") == DoseState::Alerting);
+
+  const DoseRef ref = scheduleFindByScheduleId("sch-morning");
+  assert(!scheduleSnooze(ref, nearDeadline));
+  assert(stateOf("sch-morning") == DoseState::Alerting);
+}
+
+void testSnoozedDoseStillBecomesMissed()
+{
+  resetStore();
+  stageStandardSchedule();
+
+  scheduleTick(8 * 60, DAY_ONE, false);
+  const DoseRef ref = scheduleFindByScheduleId("sch-morning");
+  assert(scheduleSnooze(ref, 8 * 60));
+  assert(stateOf("sch-morning") == DoseState::Snoozed);
+
+  // ถ้าเครื่องดับหรือผู้ใช้หายไปจนเลยเวลาผ่อนผัน มื้อที่เลื่อนไว้ต้องกลายเป็นขาดยา
+  // ไม่ใช่ค้างอยู่ในสถานะเลื่อนตลอดไป
+  scheduleTick(8 * 60 + ALERT_TIMEOUT_MINUTES + 1, DAY_ONE, false);
+  assert(stateOf("sch-morning") == DoseState::Missed);
+  assert(countTo(DoseState::Missed) == 1);
+}
+
+void testSnoozeSurvivesSync()
+{
+  resetStore();
+  stageStandardSchedule();
+
+  scheduleTick(8 * 60, DAY_ONE, false);
+  assert(scheduleSnooze(scheduleFindByScheduleId("sch-morning"), 8 * 60));
+
+  // sync รอบใหม่ระหว่างวันต้องไม่ล้างการเลื่อนที่ผู้ใช้กดไว้
+  stageStandardSchedule();
+  assert(stateOf("sch-morning") == DoseState::Snoozed);
+  assert(scheduleSnoozeCount(scheduleFindByScheduleId("sch-morning")) == 1);
+
+  const DoseRef first = scheduleFirstSnoozed();
+  assert(first.valid);
+  assert(scheduleDoseAt(first)->snoozedUntil == 8 * 60 + SNOOZE_MINUTES);
+}
+
+void testSnoozeOnlyWhileAlerting()
+{
+  resetStore();
+  stageStandardSchedule();
+
+  // ยังไม่ถึงเวลา กดเลื่อนไม่ได้
+  const DoseRef ref = scheduleFindByScheduleId("sch-morning");
+  assert(stateOf("sch-morning") == DoseState::Pending);
+  assert(!scheduleSnooze(ref, 7 * 60));
+
+  // จัดการไปแล้วก็เลื่อนไม่ได้
+  scheduleTick(8 * 60, DAY_ONE, false);
+  scheduleSetState(ref, DoseState::Done);
+  assert(!scheduleSnooze(ref, 8 * 60));
+
+  // อ้างอิงที่ไม่ถูกต้องต้องไม่ทำให้พัง
+  const DoseRef bad = {0, 0, false};
+  assert(!scheduleSnooze(bad, 8 * 60));
+  assert(scheduleSnoozeCount(bad) == 0);
+}
+
+void testDayRolloverClearsSnooze()
+{
+  resetStore();
+  stageStandardSchedule();
+
+  scheduleTick(8 * 60, DAY_ONE, false);
+  assert(scheduleSnooze(scheduleFindByScheduleId("sch-morning"), 8 * 60));
+
+  scheduleTick(0, DAY_TWO, false);
+  assert(stateOf("sch-morning") == DoseState::Pending);
+  assert(scheduleSnoozeCount(scheduleFindByScheduleId("sch-morning")) == 0);
+  assert(!scheduleFirstSnoozed().valid);
+}
+
+
+void testEffectiveMinutesFollowsSnooze()
+{
+  resetStore();
+  stageStandardSchedule();
+
+  const DoseRef ref = scheduleFindByScheduleId("sch-morning");
+  const Dose *dose = scheduleDoseAt(ref);
+
+  // ยังไม่เลื่อน: ใช้เวลาตามตาราง
+  assert(doseEffectiveMinutes(*dose) == 8 * 60);
+  assert(doseIsOpen(*dose));
+
+  scheduleTick(8 * 60, DAY_ONE, false);
+  assert(scheduleSnooze(ref, 8 * 60));
+
+  // เลื่อนแล้ว: ต้องใช้เวลาที่เลื่อนไป ไม่ใช่เวลาตามตาราง
+  // ถ้าใช้เวลาตามตาราง มื้อที่เลื่อนไปทับรอบถัดไปจะถูกจัดลำดับผิดแล้วหายจากจอ
+  assert(doseEffectiveMinutes(*dose) == 8 * 60 + SNOOZE_MINUTES);
+  assert(doseIsOpen(*dose));
+}
+
+void testSnoozeCanOverlapNextRound()
+{
+  resetStore();
+
+  // สองรอบห่างกันเท่ากับเวลาที่เลื่อนหนึ่งครั้งพอดี
+  scheduleBeginSync();
+  const int slot1 = scheduleStageSlot(1, true, "med-a", "Paracetamol", 1.0f);
+  scheduleStageDose(slot1, "sch-first", "first", 8 * 60, false);
+  const int slot2 = scheduleStageSlot(2, true, "med-b", "Amoxicillin", 1.0f);
+  scheduleStageDose(slot2, "sch-second", "second", 8 * 60 + SNOOZE_MINUTES, false);
+  scheduleStageSlot(3, false, "", "", 0.0f);
+  scheduleCommitSync();
+
+  // 08:00 มื้อแรกเตือน แล้วผู้ใช้กดเลื่อนไปชนเวลาของมื้อที่สองพอดี
+  scheduleTick(8 * 60, DAY_ONE, false);
+  const DoseRef first = scheduleFindByScheduleId("sch-first");
+  assert(scheduleSnooze(first, 8 * 60));
+  assert(doseEffectiveMinutes(*scheduleDoseAt(first)) == 8 * 60 + SNOOZE_MINUTES);
+
+  // พอถึงเวลานั้น ทั้งสองมื้อต้องถึงกำหนดพร้อมกัน ไม่มีอันไหนถูกกลืนหาย
+  const int now = 8 * 60 + SNOOZE_MINUTES;
+  scheduleTick(now, DAY_ONE, false);
+
+  const Dose *a = scheduleDoseAt(scheduleFindByScheduleId("sch-first"));
+  const Dose *b = scheduleDoseAt(scheduleFindByScheduleId("sch-second"));
+
+  assert(doseIsOpen(*a) && doseIsOpen(*b));
+  assert(doseEffectiveMinutes(*a) <= now);
+  assert(doseEffectiveMinutes(*b) <= now);
+
+  // มื้อที่เลื่อนต้องตื่นกลับมาเตือน ไม่ค้างอยู่ในสถานะเลื่อน
+  assert(a->state == DoseState::Alerting);
+  assert(b->state == DoseState::Alerting);
+}
+
+void testDoseIsOpenCoversEveryState()
+{
+  resetStore();
+  stageStandardSchedule();
+  const DoseRef ref = scheduleFindByScheduleId("sch-morning");
+  Dose *dose = scheduleDoseAt(ref);
+
+  // สถานะที่ยังต้องให้ผู้ใช้จัดการ
+  dose->state = DoseState::Pending;
+  assert(doseIsOpen(*dose));
+  dose->state = DoseState::Alerting;
+  assert(doseIsOpen(*dose));
+  dose->state = DoseState::Snoozed;
+  assert(doseIsOpen(*dose));
+  dose->state = DoseState::Dispensing;
+  assert(doseIsOpen(*dose));
+
+  // สถานะที่จบแล้ว ต้องไม่ถูกนำมาแสดงบนจออีก
+  dose->state = DoseState::Done;
+  assert(!doseIsOpen(*dose));
+  dose->state = DoseState::Missed;
+  assert(!doseIsOpen(*dose));
+  dose->state = DoseState::Skipped;
+  assert(!doseIsOpen(*dose));
+}
+
 }  // namespace
 
 int main()
@@ -293,5 +513,15 @@ int main()
   testDayRollover();
   testNextUpcoming();
   testLimitsAreRespected();
+  testSnoozeDelaysAlert();
+  testSnoozeHasQuota();
+  testSnoozeCannotCrossGracePeriod();
+  testSnoozedDoseStillBecomesMissed();
+  testSnoozeSurvivesSync();
+  testSnoozeOnlyWhileAlerting();
+  testDayRolloverClearsSnooze();
+  testEffectiveMinutesFollowsSnooze();
+  testSnoozeCanOverlapNextRound();
+  testDoseIsOpenCoversEveryState();
   return 0;
 }

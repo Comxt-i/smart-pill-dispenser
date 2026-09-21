@@ -101,13 +101,18 @@ void scheduleStageDose(int slotIndex,
   dose.minutes = minutes;
   dose.state = doneOnServer ? DoseState::Done : DoseState::Pending;
   dose.failureReported = false;
+  dose.snoozedUntil = -1;
+  dose.snoozeCount = 0;
 
   // มื้อที่เครื่องกำลังจัดการอยู่ต้องไม่ถูก sync ดึงกลับไปเป็น Pending
+  // รวมถึงการเลื่อนที่ผู้ใช้กดไว้ ต้องไม่หายไปเพราะ sync รอบใหม่
   Dose previous;
   if (!doneOnServer && findPreviousDose(dose.scheduleId, previous))
   {
     dose.state = previous.state;
     dose.failureReported = previous.failureReported;
+    dose.snoozedUntil = previous.snoozedUntil;
+    dose.snoozeCount = previous.snoozeCount;
   }
 
   ++slot.doseCount;
@@ -213,6 +218,8 @@ DoseRef scheduleTick(int nowMinutes, uint32_t dayKey, bool justBooted)
         {
           slots[s].doses[d].state = DoseState::Pending;
           slots[s].doses[d].failureReported = false;
+          slots[s].doses[d].snoozedUntil = -1;
+          slots[s].doses[d].snoozeCount = 0;
         }
       }
       dayRollover = true;
@@ -245,13 +252,27 @@ DoseRef scheduleTick(int nowMinutes, uint32_t dayKey, bool justBooted)
         scheduleSetState(ref, DoseState::Alerting);
       }
 
+      // ครบเวลาที่เลื่อนไว้แล้ว กลับมาเตือนต่อ
+      if (dose.state == DoseState::Snoozed && nowMinutes >= dose.snoozedUntil)
+      {
+        dose.snoozedUntil = -1;
+        scheduleSetState(ref, DoseState::Alerting);
+      }
+
+      // เลยเวลาผ่อนผันแล้วถือว่าขาดยา
+      //
+      // ไม่ต้องตรวจสถานะ Snoozed ตรงนี้ เพราะ scheduleSnooze() การันตีว่า snoozedUntil
+      // ไม่เกิน deadline เสมอ มื้อที่เลื่อนไว้จึงถูกปลุกกลับเป็น Alerting ในบล็อกด้านบน
+      // ก่อนถึงบรรทัดนี้แล้ว
       if (dose.state == DoseState::Alerting && nowMinutes > deadline)
       {
+        dose.snoozedUntil = -1;
         scheduleSetState(ref, DoseState::Missed);
         continue;
       }
 
       // เตือนทีละมื้อ โดยให้มื้อที่ถึงเวลาก่อนได้สิทธิ์ก่อน
+      // มื้อที่กำลังเลื่อนอยู่ไม่ถูกเลือก จึงไม่มีเสียงเตือนระหว่างนั้น
       if (dose.state == DoseState::Alerting || dose.state == DoseState::Dispensing)
       {
         const Dose *current = scheduleDoseAt(alerting);
@@ -291,6 +312,83 @@ DoseRef scheduleNextUpcoming(int nowMinutes)
   return best;
 }
 
+bool scheduleSnooze(const DoseRef &ref, int nowMinutes)
+{
+  Dose *dose = scheduleDoseAt(ref);
+  if (!dose)
+    return false;
+
+  // เลื่อนได้เฉพาะตอนที่กำลังเตือนอยู่เท่านั้น
+  if (dose->state != DoseState::Alerting)
+    return false;
+
+  if (dose->snoozeCount >= MAX_SNOOZE_PER_DOSE)
+  {
+    Serial.printf("[มื้อยา] เลื่อนครบ %u ครั้งแล้ว เลื่อนต่อไม่ได้\n",
+                  static_cast<unsigned>(MAX_SNOOZE_PER_DOSE));
+    return false;
+  }
+
+  const int wakeAt = nowMinutes + SNOOZE_MINUTES;
+  if (wakeAt > dose->minutes + ALERT_TIMEOUT_MINUTES)
+  {
+    // เลื่อนไปก็จะตื่นหลังหมดเวลาผ่อนผันอยู่ดี จึงไม่ให้เลื่อน
+    Serial.println("[มื้อยา] เลื่อนไม่ได้ เพราะจะเลยเวลาผ่อนผัน");
+    return false;
+  }
+
+  dose->snoozedUntil = wakeAt;
+  ++dose->snoozeCount;
+  scheduleSetState(ref, DoseState::Snoozed);
+
+  Serial.printf("[มื้อยา] เลื่อนไปที่ %02d:%02d (ครั้งที่ %u)\n",
+                wakeAt / 60,
+                wakeAt % 60,
+                static_cast<unsigned>(dose->snoozeCount));
+  return true;
+}
+
+DoseRef scheduleFirstSnoozed()
+{
+  DoseRef best = {0, 0, false};
+  int bestWake = 24 * 60 + 1;
+
+  for (uint8_t s = 0; s < slotCount; ++s)
+  {
+    for (uint8_t d = 0; d < slots[s].doseCount; ++d)
+    {
+      const Dose &dose = slots[s].doses[d];
+      if (dose.state != DoseState::Snoozed)
+        continue;
+      if (dose.snoozedUntil >= 0 && dose.snoozedUntil < bestWake)
+      {
+        bestWake = dose.snoozedUntil;
+        best = DoseRef{s, d, true};
+      }
+    }
+  }
+  return best;
+}
+
+uint8_t scheduleSnoozeCount(const DoseRef &ref)
+{
+  const Dose *dose = scheduleDoseAt(ref);
+  return dose ? dose->snoozeCount : 0;
+}
+
+bool doseIsOpen(const Dose &dose)
+{
+  return dose.state == DoseState::Pending || dose.state == DoseState::Alerting ||
+         dose.state == DoseState::Snoozed || dose.state == DoseState::Dispensing;
+}
+
+int doseEffectiveMinutes(const Dose &dose)
+{
+  if (dose.state == DoseState::Snoozed && dose.snoozedUntil >= 0)
+    return dose.snoozedUntil;
+  return dose.minutes;
+}
+
 const char *doseStateName(DoseState state)
 {
   switch (state)
@@ -301,6 +399,7 @@ const char *doseStateName(DoseState state)
     case DoseState::Done: return "Done";
     case DoseState::Missed: return "Missed";
     case DoseState::Skipped: return "Skipped";
+    case DoseState::Snoozed: return "Snoozed";
   }
   return "Unknown";
 }

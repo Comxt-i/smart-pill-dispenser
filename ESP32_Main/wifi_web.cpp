@@ -1,6 +1,7 @@
 #include "wifi_web.h"
 #include "config.h"
 #include "pill_app.h"
+#include "rtc_lcd.h"
 #include "secrets.h"
 
 #include <WebServer.h>
@@ -37,6 +38,8 @@ void handleHome()
     "<h1>Smart Pill Dispenser</h1>"
     "<p>ตารางยามาจาก server อัตโนมัติ หน้านี้ใช้ตรวจสอบและทดสอบหน้างานเท่านั้น</p>"
     "<table id='s'></table>"
+    "<p><button onclick='rescan()'>สแกน I2C ใหม่</button> "
+    "<span id='msg'></span></p>"
     "<form action='/dispense' method='get'>"
     "<b>ทดสอบจ่ายยา</b><br>ช่อง <input name='slot' type='number' min='1' max='3' value='1'> "
     "จำนวนเม็ด <input name='amount' type='number' min='1' max='9' step='0.5' value='1'> "
@@ -46,13 +49,37 @@ void handleHome()
     "['นาฬิกา',d.clock_valid?'ตรงกับ server':'ยังไม่ได้ตั้งเวลา'],"
     "['Sync',d.sync_ok?('สำเร็จ ('+d.config_version+')'):('ล้มเหลว: '+d.sync_error)],"
     "['ผลรอส่ง',d.pending_events],"
-    "['Servo',d.servo_movement_enabled?'เปิดใช้งาน':'ปิดอยู่ (ENABLE_SERVO_MOVEMENT=false)']];"
+    "['Servo',d.servo_movement_enabled?'เปิดใช้งาน':'ปิดอยู่ (ENABLE_SERVO_MOVEMENT=false)'],"
+    "['I2C ที่เจอ',(d.i2c_found&&d.i2c_found.length)?d.i2c_found.join(', '):'ไม่เจออุปกรณ์เลย'],"
+    "['I2C ที่ต้องเจอ',(d.i2c_expected||[]).join(', ')],"
+    "['เส้น SDA/SCL',d.i2c_lines?((!d.i2c_lines.sda_ok||!d.i2c_lines.scl_ok)"
+    "?'สายลัดลง GND หรือต่อผิดขา':((!d.i2c_lines.sda_pullup_ext||!d.i2c_lines.scl_pullup_ext)"
+    "?'ไม่มี pull-up ภายนอก (shifter ไม่ได้รับไฟ?)':'ปกติ มี pull-up ครบ')):'-']];"
     "d.slots.forEach(s=>rows.push(['ช่อง '+s.slot,(s.name||'ว่าง')+' '+(s.active?'':'(ปิดอยู่) ')+"
     "s.doses.map(x=>x.time+' '+x.state).join(', ')]));"
     "document.getElementById('s').innerHTML=rows.map(r=>'<tr><th>'+r[0]+'</th><td>'+r[1]+'</td></tr>').join('');"
-    "});</script></body></html>";
+    "});"
+    "function rescan(){document.getElementById('msg').textContent='กำลังสแกน...';"
+    "fetch('/rescan').then(r=>r.json()).then(d=>{"
+    "document.getElementById('msg').textContent='เจอ: '+((d.i2c_found&&d.i2c_found.length)?d.i2c_found.join(', '):'ไม่เจออุปกรณ์เลย');"
+    "});}"
+    "</script></body></html>";
 
   server.send(200, "text/html", page);
+}
+
+/**
+ * สแกนบัส I2C ใหม่ตามคำสั่งจากหน้าเว็บ
+ *
+ * ใช้ตอนไล่ปัญหาสายหลวมหรือ address ไม่ตรง โดยไม่ต้องรีบูตบอร์ดหรือเสียบ USB
+ * ขยับสายแล้วกดปุ่มบนหน้าเว็บซ้ำได้เรื่อยๆ
+ */
+void handleRescan()
+{
+  i2cScanAndReport();
+  String body;
+  appStatusJson(body);
+  server.send(200, "application/json", body);
 }
 
 void handleDispense()
@@ -78,6 +105,7 @@ void startServer()
 
   server.on("/", handleHome);
   server.on("/status", handleStatus);
+  server.on("/rescan", handleRescan);
   server.on("/dispense", handleDispense);
   server.begin();
   serverStarted = true;

@@ -12,6 +12,7 @@ enum class DoseState : uint8_t {
   Done,        // จ่ายสำเร็จ (หรือ server บอกว่ามื้อนี้จบไปแล้ว)
   Missed,      // เลยเวลาผ่อนผันโดยไม่มีใครกดปุ่ม
   Skipped,     // ผู้ใช้กด Cancel เพื่อข้ามมื้อนี้
+  Snoozed,     // ผู้ใช้กดเลื่อน หยุดเตือนชั่วคราวจนถึงเวลาที่เลื่อนไป
 };
 
 struct Dose {
@@ -20,13 +21,15 @@ struct Dose {
   int minutes;  // นาทีนับจากเที่ยงคืน
   DoseState state;
   bool failureReported;  // กันส่ง FAILED ซ้ำเมื่อผู้ใช้กดจ่ายแล้วพลาดหลายครั้ง
+  int snoozedUntil;      // นาทีของวันที่จะกลับมาเตือนอีกครั้ง (-1 = ไม่ได้เลื่อน)
+  uint8_t snoozeCount;   // เลื่อนไปแล้วกี่ครั้งในมื้อนี้
 };
 
 struct Slot {
   uint8_t number;  // 1..DISPENSER_COUNT
   bool active;
   char medicationId[40];
-  char name[20];  // ชื่อย่อสำหรับ LCD (server ตัดมาให้ไม่เกิน 16 ตัวอักษร)
+  char name[34];  // ชื่อสำหรับ LCD (server ตัดมาให้ไม่เกิน 32 ตัวอักษร ยาวเกินจอจะเลื่อนวน)
   float amountPerDose;
   Dose doses[MAX_DOSES_PER_SLOT];
   uint8_t doseCount;
@@ -82,7 +85,33 @@ DoseRef scheduleNextUpcoming(int nowMinutes);
 /** เปลี่ยนสถานะพร้อมบันทึกลง Serial เพื่อให้ไล่ปัญหาได้ */
 void scheduleSetState(const DoseRef &ref, DoseState state);
 
+/**
+ * เลื่อนการเตือนของมื้อนี้ออกไป SNOOZE_MINUTES นาที
+ *
+ * คืน false เมื่อเลื่อนครบโควตาแล้ว หรือเลื่อนไปจะเลยเวลาผ่อนผัน
+ * ซึ่งกันไม่ให้ผู้ใช้เลื่อนไปเรื่อยๆ จนกลายเป็นขาดยาโดยไม่รู้ตัว
+ */
+bool scheduleSnooze(const DoseRef &ref, int nowMinutes);
+
+/** จำนวนครั้งที่มื้อนี้ถูกเลื่อน ใช้แนบไปกับผลที่ส่งขึ้น server */
+uint8_t scheduleSnoozeCount(const DoseRef &ref);
+
+/** มื้อแรกที่กำลังถูกเลื่อนอยู่ ใช้แสดงบนจอว่าจะกลับมาเตือนตอนไหน */
+DoseRef scheduleFirstSnoozed();
+
 const char *doseStateName(DoseState state);
+
+/** true เมื่อมื้อนี้ยังรอให้ผู้ใช้จัดการอยู่ (ยังไม่จ่าย ไม่ข้าม และยังไม่หมดเวลา) */
+bool doseIsOpen(const Dose &dose);
+
+/**
+ * เวลาที่มื้อนี้จะเรียกร้องความสนใจจริง โดยคิดการเลื่อนเข้าไปด้วย
+ *
+ * มื้อที่ถูกเลื่อนไว้จะใช้เวลาที่เลื่อนไป ไม่ใช่เวลาตามตาราง
+ * ถ้าใช้เวลาตามตารางอย่างเดียว มื้อที่เลื่อนไปทับรอบถัดไปจะถูกจัดลำดับผิด
+ * แล้วหายไปจากจอทั้งที่กำลังเตือนอยู่
+ */
+int doseEffectiveMinutes(const Dose &dose);
 
 /** true หนึ่งครั้งเมื่อข้ามไปวันใหม่ ใช้สั่ง sync ตารางของวันใหม่ทันที */
 bool scheduleConsumeDayRollover();
