@@ -148,7 +148,21 @@ void wifiWebBegin()
     saved.ssid[32] = '\0'; saved.password[63] = '\0';
     if (saved.magic != WIFI_MAGIC || !validSetupWifi(saved.ssid, saved.password)) saved = {};
   }
-  // Legacy compiled credentials intentionally do not bypass the new first-time setup.
+  // Optional administrator-provisioned network. Keep any later portal settings.
+#if defined(WIFI_PRESET_ENABLED) && WIFI_PRESET_ENABLED
+  if (saved.magic != WIFI_MAGIC && storageReady && validSetupWifi(WIFI_SSID, WIFI_PASSWORD)) {
+    WifiSettings preset = {};
+    preset.magic = WIFI_MAGIC;
+    strcpy(preset.ssid, WIFI_SSID);
+    strcpy(preset.password, WIFI_PASSWORD);
+    if (storage.putBytes("config", &preset, sizeof(preset)) == sizeof(preset)) {
+      saved = preset;
+      Serial.println("[Wi-Fi] Preset saved; connecting automatically");
+    } else {
+      Serial.println("[Wi-Fi] Could not save preset; opening setup");
+    }
+  }
+#endif
   WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(true);
   server.on("/", HTTP_GET, handleHome);
   server.on("/setup/connect", HTTP_POST, handleConnect);

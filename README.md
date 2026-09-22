@@ -1,4 +1,4 @@
-> Wi-Fi setup update: firmware 1.1.0 uses the QR/login + local setup portal. See [QR Wi-Fi setup](docs/QR_WIFI_SETUP.md). `WIFI_SSID`/`WIFI_PASSWORD` are legacy fields and are no longer used. Configure only the backend URL and per-device API key before flashing.
+> Wi-Fi setup update: firmware 1.1.0 uses the QR/login + local setup portal. See [QR Wi-Fi setup](docs/QR_WIFI_SETUP.md). To provision a network before flashing, set `WIFI_PRESET_ENABLED true` and fill `WIFI_SSID`/`WIFI_PASSWORD` in local `secrets.h`. On boot, the firmware saves this network only if no valid Wi-Fi settings exist, then connects automatically. Existing saved networks take priority. Account pairing still uses the setup portal; hold the green button while powering on for 3 seconds to open it.
 
 # Smart Pill Dispenser
 
