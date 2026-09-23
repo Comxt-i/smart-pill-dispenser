@@ -2,8 +2,10 @@
 #include "../ESP32_Main/wifi_web.cpp"
 unsigned long fakeTime = 0;
 unsigned long millis() { return fakeTime; }
-int digitalRead(uint8_t) { return HIGH; }
-void delay(unsigned long) {}
+unsigned long releaseAt = 0;
+int digitalRead(uint8_t) { return fakeTime < releaseAt ? LOW : HIGH; }
+void delay(unsigned long ms) { fakeTime += ms; }
+void pinMode(uint8_t, uint8_t) {}
 SerialClass Serial;
 EspClass ESP;
 WiFiClass WiFi;
@@ -51,5 +53,27 @@ int main() {
   assert(strcmp(saved.ssid,"Home")==0 && setupToken[0]=='\0');
   fakeTime+=10001; wifiWebLoop(); assert(!wifiSetupActive() && requestedSync==1);
   saved={}; wifiWebBegin(); assert(saved.magic==WIFI_MAGIC && !wifiSetupActive());
+  // Boot gesture is captured before peripheral initialization and stays latched.
+  releaseAt = fakeTime + 4000;
+  wifiCheckSetupButtonAtBoot();
+  assert(bootSetupRequested);
+  fakeTime += 15000;
+  wifiWebBegin();
+  assert(wifiSetupActive());
+  setupActive = false;
+  releaseAt = fakeTime + 1000;
+  wifiCheckSetupButtonAtBoot();
+  assert(!bootSetupRequested);
+  wifiWebBegin();
+  assert(!wifiSetupActive());
+  releaseAt = 0;
+  wifiCheckSetupButtonAtBoot();
+  assert(!bootSetupRequested);
+  // Runtime entry also works with saved Wi-Fi and no reboot gesture.
+  const auto previousSettings = storage.bytes;
+  assert(wifiStartSetup() && wifiSetupActive());
+  assert(storage.bytes == previousSettings);
+  assert(wifiStartSetup());
+  assert(storage.bytes == previousSettings);
   return 0;
 }

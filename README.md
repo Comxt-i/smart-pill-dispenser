@@ -1,4 +1,4 @@
-> Wi-Fi setup update: firmware 1.1.0 uses the QR/login + local setup portal. See [QR Wi-Fi setup](docs/QR_WIFI_SETUP.md). To provision a network before flashing, set `WIFI_PRESET_ENABLED true` and fill `WIFI_SSID`/`WIFI_PASSWORD` in local `secrets.h`. On boot, the firmware saves this network only if no valid Wi-Fi settings exist, then connects automatically. Existing saved networks take priority. Account pairing still uses the setup portal; hold the green button while powering on for 3 seconds to open it.
+> Wi-Fi setup update: firmware 1.1.0 uses the QR/login + local setup portal. See [QR Wi-Fi setup](docs/QR_WIFI_SETUP.md). To provision a network before flashing, set `WIFI_PRESET_ENABLED true` and fill `WIFI_SSID`/`WIFI_PASSWORD` in local `secrets.h`. On boot, the firmware saves this network only if no valid Wi-Fi settings exist, then connects automatically. Existing saved networks take priority. Account pairing still uses the setup portal; hold the green GPIO33 button for 3 seconds while the mechanism is idle to open it; no restart is needed. The power-on gesture is also supported.
 
 # Smart Pill Dispenser
 
@@ -85,10 +85,13 @@ constexpr uint8_t LCD_MEDICINE_ROWS = 4;
 
 | ปุ่ม | สีบนโมดูล | ขาโมดูล | GPIO | กดขณะกำลังเตือน | กดตอนปกติ |
 |---|---|---|---:|---|---|
-| Dispense | เขียว | K3 | 33 | จ่ายยามื้อนั้น | เตือนว่ายังไม่ถึงเวลา |
+| Dispense (กดสั้นแล้วปล่อย) | เขียว | K3 | 33 | จ่ายยามื้อนั้นเมื่อปล่อยปุ่ม | เตือนว่ายังไม่ถึงเวลา |
+| Wi-Fi Setup (กดค้าง 3 วินาที) | เขียว | K3 | 33 | เข้า Setup เมื่อกลไกว่าง โดยไม่จ่ายยา | เข้า Setup โดยไม่ต้องรีสตาร์ต |
 | Snooze | เหลือง | K2 | 32 | เลื่อนไปอีก 5 นาที | สั่ง sync ตารางใหม่ทันที |
 | Cancel | แดง | K1 | 27 | กดสั้น = ข้ามมื้อนี้ (บันทึก SKIPPED) | — |
 | Cancel (กดค้าง ≥ 1.2 วินาที) | แดง | K1 | 27 | หยุดส่ง PWM ทันที | หยุดส่ง PWM ทันที |
+
+กดค้างจะไม่สั่งจ่ายยาเมื่อปล่อยปุ่ม หากกลไกทำงานระหว่างกด ต้องปล่อยแล้วกดใหม่หลังกลไกว่าง ระหว่าง Setup จะพักการจ่ายยาและการเตือนจนตั้งค่าเสร็จ
 
 การหยุด PWM ไม่ใช่การตัดไฟ Servo หรือการรับประกันว่ากลไกหยุดทันที
 

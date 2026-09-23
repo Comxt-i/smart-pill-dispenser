@@ -3,6 +3,7 @@
 unsigned long millis() { return 0; }
 int digitalRead(uint8_t) { return HIGH; }
 void delay(unsigned long) {}
+void pinMode(uint8_t, uint8_t) {}
 SerialClass Serial;
 EspClass ESP;
 WiFiClass WiFi;

@@ -13,6 +13,7 @@ LiquidCrystal_I2C lcdMedicine(LCD_MEDICINE_ADDRESS, LCD_MEDICINE_COLS, LCD_MEDIC
 
 tmElements_t currentTime;
 bool clockValid = false;
+bool timeLcdPresent = false, medicineLcdPresent = false, rtcPresent = false;
 unsigned long lastRefreshMs = 0;
 
 // จำข้อความที่แสดงอยู่จริงของแต่ละบรรทัด เพื่อเขียนเฉพาะบรรทัดที่เปลี่ยน
@@ -38,6 +39,8 @@ uint8_t foundCount = 0;
 /** เติมช่องว่างให้เต็มความกว้างจอ เพื่อลบข้อความเดิมที่ยาวกว่าโดยไม่ต้อง clear ทั้งจอ */
 void printPadded(LiquidCrystal_I2C &lcd, uint8_t row, uint8_t cols, const char *text)
 {
+  if ((&lcd == &lcdTime && !timeLcdPresent) ||
+      (&lcd == &lcdMedicine && !medicineLcdPresent)) return;
   char padded[LCD_MAX_COLS + 1];
   snprintf(padded, sizeof(padded), "%-*.*s", cols, cols, text ? text : "");
   lcd.setCursor(0, row);
@@ -110,6 +113,9 @@ bool i2cScanAndReport()
   if (!foundRtc)
     Serial.println("[I2C] เตือน: ไม่พบ DS1307 ที่ 0x68 นาฬิกาจะไม่เดินต่อเมื่อไฟดับ");
 
+  timeLcdPresent = foundTimeLcd;
+  medicineLcdPresent = foundMedicineLcd;
+  rtcPresent = foundRtc;
   const bool complete = foundTimeLcd && foundMedicineLcd && foundRtc;
   if (complete)
     Serial.println("[I2C] พบอุปกรณ์ครบตามที่ตั้งค่าไว้");
@@ -203,15 +209,19 @@ uint8_t i2cFoundAddress(uint8_t index)
 
 void rtcLcdBegin()
 {
-  lcdTime.init();
-  lcdTime.backlight();
-  lcdTime.clear();
+  if (timeLcdPresent) {
+    lcdTime.init();
+    lcdTime.backlight();
+    lcdTime.clear();
+  }
   writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], "Smart Pill Box");
   writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], "Starting...");
 
-  lcdMedicine.init();
-  lcdMedicine.backlight();
-  lcdMedicine.clear();
+  if (medicineLcdPresent) {
+    lcdMedicine.init();
+    lcdMedicine.backlight();
+    lcdMedicine.clear();
+  }
   lcdShowMessage("Connecting", "Please wait...");
 }
 
@@ -222,7 +232,7 @@ void rtcLcdUpdate()
 
   lastRefreshMs = millis();
 
-  if (!RTC.read(currentTime))
+  if (!rtcPresent || !RTC.read(currentTime))
   {
     clockValid = false;
     writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], "RTC ERROR");
@@ -255,7 +265,7 @@ void rtcLcdUpdate()
 
 void rtcSyncFromEpoch(uint32_t localEpoch)
 {
-  if (localEpoch == 0)
+  if (!rtcPresent || localEpoch == 0)
     return;
 
   // เขียน RTC เฉพาะตอนที่เพี้ยนจริง การเขียนทุกนาทีทำให้ EEPROM/บัสทำงานโดยไม่จำเป็น
@@ -352,6 +362,7 @@ void lcdShowMessage(const char *line1, const char *line2)
 
 void lcdMedicineTick()
 {
+  if (!medicineLcdPresent) return;
   const unsigned long now = millis();
 
   if (!hintTimerStarted)
