@@ -3,6 +3,7 @@
 #include "config.h"
 #include "pill_app.h"
 #include "rtc_lcd.h"
+#include "wifi_web.h"
 
 void setup()
 {
@@ -10,6 +11,8 @@ void setup()
   delay(200);
   Serial.println();
   Serial.printf("Smart Pill Dispenser firmware %s\n", FIRMWARE_VERSION);
+
+  wifiCheckSetupButtonAtBoot();
 
   // ตรวจสภาพเส้นสัญญาณก่อนเปิดใช้บัส ต้องทำก่อน Wire.begin() เท่านั้น
   // ผลจะบอกได้ว่า "ไม่เจออุปกรณ์" เกิดจากไม่มี pull-up หรือสายลัด

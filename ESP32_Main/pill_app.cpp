@@ -2,6 +2,7 @@
 
 #include "alert.h"
 #include "buttons.h"
+#include "setup_button.h"
 #include "config.h"
 #include "dispenser_control.h"
 #include "event_queue.h"
@@ -39,6 +40,7 @@ unsigned long lastEventFlushMs = 0;
 bool flushRequested = false;  // มีผลใหม่เข้าคิว ให้ส่งทันทีที่จบรอบ loop
 unsigned long cancelPressedAtMs = 0;
 bool cancelPressActive = false;
+SetupButtonGesture setupButton;
 char lastNotice[24] = "";
 unsigned long noticeUntilMs = 0;
 
@@ -471,9 +473,26 @@ void handleDispenseOutcome()
 void handleButtons()
 {
   Dose *alertDose = scheduleDoseAt(activeAlert);
-  const bool alerting = alertDose && alertDose->state == DoseState::Alerting;
+  const bool alerting = !wifiSetupActive() && alertDose && alertDose->state == DoseState::Alerting;
 
+  // Consume the down edge, but never dispense until a short press is released.
   if (buttonPressed(ButtonId::Dispense))
+    Serial.println("[Button] GPIO33 pressed; hold 3 seconds for Wi-Fi Setup");
+  const auto action = setupButton.update(buttonHeld(ButtonId::Dispense), millis(),
+      !wifiSetupActive() && !dispenserIsBusy() && runOwner == RunOwner::None);
+  if (action == SetupButtonAction::OpenSetup) {
+    Serial.println("[Setup] GPIO33 held 3 seconds; requesting Wi-Fi Setup");
+    if (!wifiStartSetup()) {
+      alertOneShot(AlertPattern::Warning);
+      showNotice("SETUP FAILED");
+    }
+  } else if (action == SetupButtonAction::Blocked && !wifiSetupActive()) {
+    Serial.println("[Setup] Busy during button hold; release and try again");
+    alertOneShot(AlertPattern::Warning);
+    showNotice("BUSY");
+  }
+
+  if (action == SetupButtonAction::ShortPress)
   {
     if (alerting)
     {
@@ -487,7 +506,7 @@ void handleButtons()
     }
   }
 
-  if (buttonPressed(ButtonId::Snooze))
+  if (buttonPressed(ButtonId::Snooze) && !wifiSetupActive())
   {
     if (alerting)
     {
@@ -537,7 +556,7 @@ void handleButtons()
   if (cancelPressActive && !buttonHeld(ButtonId::Cancel))
   {
     cancelPressActive = false;
-    if (millis() - cancelPressedAtMs < CANCEL_HOLD_MS && alerting)
+    if (millis() - cancelPressedAtMs < CANCEL_HOLD_MS && alerting && !wifiSetupActive())
     {
       // ปุ่มแดงกดสั้น: ข้ามทั้งรอบ ให้สอดคล้องกับปุ่มเขียวที่รับทั้งรอบ
       alertOneShot(AlertPattern::Click);
@@ -841,57 +860,51 @@ void appLoop()
   dispenserControlUpdate();
   rtcLcdUpdate();
 
-  // Setup is entered only at boot; preserve emergency buttons while configuring Wi-Fi.
+  handleDispenseOutcome();
+
+  if (!wifiSetupActive())
+  {
+    if (scheduleConsumeDayRollover()) netSyncRequestNow();
+    const bool clockValid = rtcIsValid();
+    if (clockValid && !clockWasValid) firstTickAfterClock = true;
+    clockWasValid = clockValid;
+    if (clockValid && scheduleHasData()) {
+      activeAlert = scheduleTick(rtcMinutesOfDay(), rtcDayKey(), firstTickAfterClock);
+      firstTickAfterClock = false;
+    }
+  }
+
+  // Process physical gestures before any blocking network work or queued commands.
+  handleButtons();
   if (wifiSetupActive())
   {
-    handleButtons();
+    alertSet(AlertPattern::None);
+    alertUpdate();
     showSetupScreen();
-    // ต้องเรียกเองตรงนี้ เพราะบรรทัดนี้ return ก่อนถึงจุดที่เรียก lcdMedicineTick() ตามปกติ
-    // ถ้าไม่เรียก ข้อความที่ยาวเกินจอจะค้างไม่เลื่อน
     lcdMedicineTick();
     return;
   }
 
-  // ตารางยาของวันใหม่ต้องดึงใหม่ทันทีที่ข้ามเที่ยงคืน
-  if (scheduleConsumeDayRollover())
-    netSyncRequestNow();
-
-  // ได้เวลาจาก RTC ครั้งแรกหลังบูต: ต้องรู้ก่อนว่าจะข้ามมื้อที่เลยมานานหรือไม่
-  const bool clockValid = rtcIsValid();
-  if (clockValid && !clockWasValid)
-    firstTickAfterClock = true;
-  clockWasValid = clockValid;
-
-  if (netSyncDue())
-    netSyncFetch();
-
-  const bool flushDue = millis() - lastEventFlushMs >= EVENT_FLUSH_INTERVAL_MS;
-  if ((flushRequested || flushDue) && eventQueueSize() > 0)
+  // Keep reading the hold gesture promptly; defer network work until release.
+  if (!buttonHeld(ButtonId::Dispense))
   {
-    lastEventFlushMs = millis();
-    flushRequested = false;
-    netSyncFlushEvents();
+    if (netSyncDue()) netSyncFetch();
+    const bool flushDue = millis() - lastEventFlushMs >= EVENT_FLUSH_INTERVAL_MS;
+    if ((flushRequested || flushDue) && eventQueueSize() > 0) {
+      lastEventFlushMs = millis();
+      flushRequested = false;
+      netSyncFlushEvents();
+    } else if (flushDue) {
+      lastEventFlushMs = millis();
+      flushRequested = false;
+    }
   }
-  else if (flushDue)
-  {
-    lastEventFlushMs = millis();
-    flushRequested = false;
-  }
-
-  if (clockValid && scheduleHasData())
-  {
-    activeAlert = scheduleTick(rtcMinutesOfDay(), rtcDayKey(), firstTickAfterClock);
-    firstTickAfterClock = false;
-  }
-
-  handleDispenseOutcome();
-  handleButtons();
 
   // ช่องที่รอคิวอยู่เริ่มเองทันทีที่มีจานว่าง ผู้ใช้จึงกดปุ่มครั้งเดียวพอ
   startPendingDoses();
 
   // คำสั่งจากเว็บทำได้เฉพาะตอนที่กลไกว่างและไม่มีมื้อยาค้างคิวอยู่
-  if (!dispenserIsBusy() && pendingDoseCount == 0)
+  if (!buttonHeld(ButtonId::Dispense) && !dispenserIsBusy() && pendingDoseCount == 0)
   {
     RemoteCommand command;
     if (netSyncTakeCommand(command))

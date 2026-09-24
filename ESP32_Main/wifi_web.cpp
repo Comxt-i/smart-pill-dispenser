@@ -20,8 +20,8 @@ DNSServer dns;
 Preferences storage;
 bool storageReady = false, setupActive = false, wasConnected = false;
 bool connecting = false, startPending = false, completed = false;
-bool bootHold = false;
-unsigned long bootAt = 0, attemptAt = 0, nextClaimAt = 0, closeAt = 0, lastReconnectMs = 0;
+bool bootSetupRequested = false;
+unsigned long attemptAt = 0, nextClaimAt = 0, closeAt = 0, lastReconnectMs = 0;
 constexpr unsigned long CONNECT_TIMEOUT_MS = 30000, RECONNECT_MS = 10000;
 constexpr uint32_t WIFI_MAGIC = 0x50425731;
 struct WifiSettings { uint32_t magic; char ssid[33]; char password[64]; };
@@ -73,11 +73,12 @@ bool requirePortal()
 
 void startSetup()
 {
-  if (setupActive || !setupIdentity()) return;
+  if (setupActive) return;
+  if (!setupIdentity()) { Serial.println("[Setup] Cannot generate AP identity"); return; }
   for (int i = 0; i < 4; i++) snprintf(nonce + i * 8, 9, "%08lx", static_cast<unsigned long>(esp_random()));
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
-  if (!WiFi.softAP(setupSsid, setupPassword)) { message = "เปิด Wi-Fi Setup ไม่สำเร็จ กรุณาเปิดเครื่องใหม่"; return; }
+  if (!WiFi.softAP(setupSsid, setupPassword)) { Serial.println("[Setup] softAP failed"); message = "เปิด Wi-Fi Setup ไม่สำเร็จ กรุณาเปิดเครื่องใหม่"; return; }
   dns.start(53, "*", WiFi.softAPIP());
   setupActive = true;
   // พิมพ์รหัสผ่านออกมาด้วย เพื่อให้มีทางดูสำรองตอนจอ LCD เสียหรือต่อ I2C ไม่ติด
@@ -90,7 +91,7 @@ void handleHome()
 {
   if (!setupActive) {
     // Status-only page. No unauthenticated motor controls on the setup/LAN web server.
-    server.send(200, "text/html; charset=utf-8", "<meta charset='utf-8'><h1>Smart Pill Box</h1><p>ตั้งค่า Wi-Fi: กด CONFIRM ค้างขณะเปิดเครื่อง 3 วินาที แล้วเชื่อม Wi-Fi Setup ตามป้ายบนกล่อง</p>");
+    server.send(200, "text/html; charset=utf-8", "<meta charset='utf-8'><h1>Smart Pill Box</h1><p>ตั้งค่า Wi-Fi: กดปุ่มเขียว GPIO33 ค้าง 3 วินาทีขณะกลไกว่าง แล้วเชื่อม Wi-Fi Setup ตามป้ายบนกล่อง</p>");
     return;
   }
   if (!requirePortal()) return;
@@ -139,16 +140,49 @@ void handleSetupStatus()
 }
 }
 
+void wifiCheckSetupButtonAtBoot()
+{
+  pinMode(CONFIRM_BUTTON_PIN, INPUT_PULLUP);
+  delay(5);
+  bootSetupRequested = false;
+  const bool pressed = digitalRead(CONFIRM_BUTTON_PIN) == LOW;
+  Serial.printf("[Setup] GPIO%u at boot: %s\n", CONFIRM_BUTTON_PIN, pressed ? "LOW (pressed)" : "HIGH (released)");
+  if (!pressed) return;
+  const unsigned long started = millis();
+  while (digitalRead(CONFIRM_BUTTON_PIN) == LOW) {
+    if (millis() - started >= 3000) {
+      bootSetupRequested = true;
+      Serial.println("[Setup] Button held 3 seconds; opening setup after initialization");
+      return;
+    }
+    delay(10);
+  }
+  Serial.println("[Setup] Button released before 3 seconds");
+}
+
 void wifiWebBegin()
 {
-  bootAt = millis(); bootHold = digitalRead(CONFIRM_BUTTON_PIN) == LOW;
   storageReady = storage.begin("pillwifi", false);
   if (storageReady && storage.getBytesLength("config") == sizeof(saved)) {
     storage.getBytes("config", &saved, sizeof(saved));
     saved.ssid[32] = '\0'; saved.password[63] = '\0';
     if (saved.magic != WIFI_MAGIC || !validSetupWifi(saved.ssid, saved.password)) saved = {};
   }
-  // Legacy compiled credentials intentionally do not bypass the new first-time setup.
+  // Optional administrator-provisioned network. Keep any later portal settings.
+#if defined(WIFI_PRESET_ENABLED) && WIFI_PRESET_ENABLED
+  if (saved.magic != WIFI_MAGIC && storageReady && validSetupWifi(WIFI_SSID, WIFI_PASSWORD)) {
+    WifiSettings preset = {};
+    preset.magic = WIFI_MAGIC;
+    strcpy(preset.ssid, WIFI_SSID);
+    strcpy(preset.password, WIFI_PASSWORD);
+    if (storage.putBytes("config", &preset, sizeof(preset)) == sizeof(preset)) {
+      saved = preset;
+      Serial.println("[Wi-Fi] Preset saved; connecting automatically");
+    } else {
+      Serial.println("[Wi-Fi] Could not save preset; opening setup");
+    }
+  }
+#endif
   WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(true);
   server.on("/", HTTP_GET, handleHome);
   server.on("/setup/connect", HTTP_POST, handleConnect);
@@ -164,18 +198,14 @@ void wifiWebBegin()
     } else server.send(404, "text/plain", "Not found");
   });
   server.begin();
-  if (saved.magic == WIFI_MAGIC) WiFi.begin(saved.ssid, saved.password);
-  else startSetup();
+  if (saved.magic == WIFI_MAGIC && !bootSetupRequested) WiFi.begin(saved.ssid, saved.password);
+  if (bootSetupRequested || saved.magic != WIFI_MAGIC) startSetup();
   lastReconnectMs = millis();
 }
 
 void wifiWebLoop()
 {
   const unsigned long now = millis();
-  if (bootHold) {
-    if (digitalRead(CONFIRM_BUTTON_PIN) != LOW) bootHold = false;
-    else if (now - bootAt >= 3000) { bootHold = false; startSetup(); }
-  }
   server.handleClient();
   if (setupActive) dns.processNextRequest();
   if (startPending) {
@@ -222,6 +252,8 @@ void wifiWebLoop()
   if (connected && !wasConnected) Serial.println("[Wi-Fi] Connected");
   wasConnected = connected;
 }
+
+bool wifiStartSetup() { startSetup(); return setupActive; }
 
 bool wifiIsConnected() { return WiFi.status() == WL_CONNECTED; }
 bool wifiSetupActive() { return setupActive; }

@@ -2,7 +2,10 @@
 
 // คัดลอกไฟล์นี้เป็น secrets.h แล้วแก้ค่าให้ตรงกับระบบของตนเอง (secrets.h ถูก .gitignore ไว้)
 
-#define WIFI_SSID "" // Legacy only: new firmware configures Wi-Fi through the setup portal.
+// Optional: save this network on first boot when no Wi-Fi is stored yet.
+// Does not pair the box with a website account; use the setup portal for pairing.
+#define WIFI_PRESET_ENABLED false
+#define WIFI_SSID ""
 #define WIFI_PASSWORD ""
 
 // URL ของ backend โดยไม่ต้องมี / ปิดท้าย รองรับทั้ง http และ https
