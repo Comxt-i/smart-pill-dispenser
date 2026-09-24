@@ -24,10 +24,11 @@ void advance(unsigned long ms)
 }
 
 /**
- * จำลองเม็ดยาหนึ่งเม็ดตกผ่านลำแสง
+ * จำลองเม็ดยาหนึ่งเม็ดตกผ่านลำแสงของจานนั้น
  *
- * ต้องขยับเวลาให้พ้น PILL_DETECT_LOCKOUT_MS ก่อน ไม่อย่างนั้นจะถูกกลไกกันนับซ้ำกลืนไป
- * ซึ่งเป็นพฤติกรรมที่ถูกต้อง และมีเทสต์แยกครอบไว้ด้านล่าง
+ * ต้องขยับเวลาให้พ้น PILL_DETECT_LOCKOUT_MS ก่อนหยดเม็ดถัดไปของจานเดียวกัน
+ * ไม่อย่างนั้นจะถูกกลไกกันนับซ้ำกลืนไป ซึ่งเป็นพฤติกรรมที่ถูกต้อง
+ * และมีเทสต์แยกครอบไว้ด้านล่าง
  */
 void dropPill(uint8_t unit)
 {
@@ -62,6 +63,25 @@ int lastVibrationDir(uint8_t unit)
   return -1;
 }
 
+/** จำนวนพัลส์ที่ถูกส่งไปยัง servo ของจานนั้น */
+size_t pulseCountFor(uint8_t unit)
+{
+  size_t count = 0;
+  for (size_t i = 0; i < pulses.size(); ++i)
+  {
+    if (pulses[i].pin == SERVO_PINS[unit - 1])
+      ++count;
+  }
+  return count;
+}
+
+void clearLog()
+{
+  pulses.clear();
+  analogWrites.clear();
+  digitalWrites.clear();
+}
+
 }  // namespace
 
 int main()
@@ -72,7 +92,7 @@ int main()
   dispenserControlBegin();
 
   assert(attachedCount == 0 && pulses.empty());
-  assert(!dispenserIsBusy());
+  assert(!dispenserIsBusy() && dispenserHasCapacity());
   assert(!takeDispenseOutcome(outcome));  // ยังไม่เคยจ่าย จึงยังไม่มีผลให้อ่าน
 
   assert(dispenseMedicine(0, 1) == DispenseResult::Invalid);
@@ -95,17 +115,15 @@ int main()
   }
 
   // -------------------------------------------------------------------------
-  // เม็ดยาตกตั้งแต่รอบแรก: ต้องจบทันทีที่จานกลับถึงตำแหน่งพัก ไม่ต้องเขย่าต่อ
+  // จานเดียว เม็ดตกตั้งแต่รอบแรก: จบทันทีที่กลับถึงตำแหน่งพัก ไม่ต้องเขย่าต่อ
   // -------------------------------------------------------------------------
   for (uint8_t unit = 1; unit <= DISPENSER_COUNT; ++unit)
   {
-    pulses.clear();
-    analogWrites.clear();
-    digitalWrites.clear();
+    clearLog();
 
     assert(dispenseMedicine(unit, 1) == DispenseResult::Started);
     assert(attachedCount == 1 && dispenserIsBusy());
-    assert(dispenseMedicine(1, 1) == DispenseResult::Busy);
+    assert(dispenseMedicine(unit, 1) == DispenseResult::Busy);  // จานเดิมซ้ำ
 
     // ช่วงหมุนออกต้องสั่นอยู่ (กระตุกเต็มกำลังก่อน)
     assert(pulses.size() == 1 && pulses[0].value == RELEASE_PULSE_US[unit - 1]);
@@ -116,12 +134,17 @@ int main()
     advance(VIB_KICK_MS);
     assert(lastVibrationPwm(unit) == VIB_SPEED);
 
-    if (ENABLE_PILL_SENSOR)
-      dropPill(unit);
+    if (!ENABLE_PILL_SENSOR)
+    {
+      stopDispenser();
+      (void)takeDispenseOutcome(outcome);
+      continue;
+    }
+
+    dropPill(unit);
 
     // ยังไม่ครบเวลาเดินทาง ห้ามเปลี่ยนช่วง แม้จะนับเม็ดครบแล้วก็ตาม
-    assert(pulses.size() == 1);
-    assert(dispenserIsBusy());
+    assert(pulses.size() == 1 && dispenserIsBusy());
 
     advance(MOVE_TIME_MS);  // จบ Releasing -> Returning
     assert(pulses.size() == 2 && pulses[1].value == REST_PULSE_US[unit - 1]);
@@ -130,28 +153,88 @@ int main()
 
     advance(MOVE_TIME_MS);  // จบ Returning -> ครบแล้วจึงจบงาน ไม่เข้า Shaking
 
-    if (ENABLE_PILL_SENSOR)
-    {
-      assert(!dispenserIsBusy());
-      assert(attachedCount == 0);
-      assert(lastVibrationPwm(unit) == 0);  // ดับมอเตอร์เมื่อจบงาน
+    assert(!dispenserIsBusy() && attachedCount == 0);
+    assert(lastVibrationPwm(unit) == 0);  // ดับมอเตอร์เมื่อจบงาน
 
-      assert(takeDispenseOutcome(outcome));
-      assert(outcome.dispenser == unit);
-      assert(outcome.requestedPills == 1 && outcome.dispensedPills == 1);
-      assert(outcome.attempts == 1);
-      assert(!outcome.cancelled && outcome.sensorVerified);
-      assert(!takeDispenseOutcome(outcome));  // ผลหนึ่งรอบอ่านได้ครั้งเดียว
+    assert(takeDispenseOutcome(outcome));
+    assert(outcome.dispenser == unit);
+    assert(outcome.requestedPills == 1 && outcome.dispensedPills == 1);
+    assert(outcome.attempts == 1);
+    assert(!outcome.cancelled && outcome.sensorVerified);
+    assert(!takeDispenseOutcome(outcome));  // ผลหนึ่งรอบอ่านได้ครั้งเดียว
 
-      assert(pulses.size() == 2);  // หนึ่งรอบ = ออกหนึ่งครั้ง กลับหนึ่งครั้ง
-      assert(pulses[0].pin == SERVO_PINS[unit - 1]);
-      assert(pulses[1].pin == SERVO_PINS[unit - 1]);
-    }
-    else
+    assert(pulses.size() == 2);  // หนึ่งรอบ = ออกหนึ่งครั้ง กลับหนึ่งครั้ง
+  }
+
+  if (ENABLE_PILL_SENSOR && MAX_CONCURRENT_DISPENSERS >= 2)
+  {
+    // -----------------------------------------------------------------------
+    // เดินได้พร้อมกันถึงเพดาน จานที่เกินต้องรอ
+    //
+    // เขียนอิงค่า MAX_CONCURRENT_DISPENSERS ตรงๆ ไม่ผูกกับเลข 2
+    // ไม่อย่างนั้นถ้ามีคนไปแก้เพดาน บล็อกนี้จะถูกข้ามเงียบๆ แล้วเทสต์ผ่านแบบว่างเปล่า
+    // -----------------------------------------------------------------------
+    clearLog();
+
+    uint8_t startedUnits = 0;
+    for (uint8_t unit = 1; unit <= DISPENSER_COUNT; ++unit)
     {
-      stopDispenser();
-      (void)takeDispenseOutcome(outcome);
+      if (dispenseMedicine(unit, 1) == DispenseResult::Started)
+        ++startedUnits;
+      else
+        break;  // เต็มเพดานแล้ว
     }
+
+    assert(startedUnits == MAX_CONCURRENT_DISPENSERS);
+    assert(!dispenserHasCapacity());
+    assert(attachedCount == MAX_CONCURRENT_DISPENSERS);
+
+    // จานแรกออกตัวทันที ที่เหลือต้องรอเหลื่อมจังหวะก่อน
+    // ไม่อย่างนั้นกระแสพุ่งตอนออกตัวของหลาย servo จะซ้อนกันพอดี
+    assert(pulseCountFor(1) == 1);
+    for (uint8_t unit = 2; unit <= startedUnits; ++unit)
+      assert(pulseCountFor(unit) == 0);
+
+    // จานที่เกินเพดานต้องถูกปฏิเสธ (มีให้ทดสอบเฉพาะตอนที่เพดานน้อยกว่าจำนวนจาน)
+    if (startedUnits < DISPENSER_COUNT)
+      assert(dispenseMedicine(static_cast<uint8_t>(startedUnits + 1), 1) == DispenseResult::Busy);
+
+    advance(DISPENSE_STAGGER_MS);  // ครบเวลาเหลื่อม จานที่เหลือจึงออกตัว
+    for (uint8_t unit = 2; unit <= startedUnits; ++unit)
+      assert(pulseCountFor(unit) == 1);
+    if (startedUnits < DISPENSER_COUNT)
+      assert(dispenseMedicine(static_cast<uint8_t>(startedUnits + 1), 1) == DispenseResult::Busy);
+
+    // ตัวนับแยกรายจาน หยดพร้อมกันแล้วต้องไม่กวนกัน
+    dropPill(1);
+    dropPill(2);
+
+    advance(MOVE_TIME_MS - DISPENSE_STAGGER_MS);  // จานหนึ่งเข้า Returning
+    assert(pulseCountFor(1) == 2 && pulseCountFor(2) == 1);
+
+    advance(DISPENSE_STAGGER_MS);  // จานสองเข้า Returning
+    assert(pulseCountFor(2) == 2);
+    assert(dispenserIsBusy());
+
+    advance(MOVE_TIME_MS - DISPENSE_STAGGER_MS);  // จานหนึ่งจบ
+    assert(dispenserIsBusy());       // จานสองยังทำงานอยู่
+    assert(dispenserHasCapacity());  // แต่มีที่ว่างแล้ว
+    assert(dispenseMedicine(3, 1) == DispenseResult::Started);
+
+    // -----------------------------------------------------------------------
+    // คิวผลลัพธ์ต้องเก็บได้หลายใบ ไม่ใช่ทับกันเหลือใบเดียว
+    // -----------------------------------------------------------------------
+    advance(DISPENSE_STAGGER_MS);  // จานสองจบ
+
+    assert(takeDispenseOutcome(outcome));
+    assert(outcome.dispenser == 1 && outcome.dispensedPills == 1 && !outcome.cancelled);
+    assert(takeDispenseOutcome(outcome));
+    assert(outcome.dispenser == 2 && outcome.dispensedPills == 1 && !outcome.cancelled);
+    assert(!takeDispenseOutcome(outcome));
+
+    stopDispenser();  // เก็บกวาดจานสามที่ยังค้างอยู่
+    assert(takeDispenseOutcome(outcome) && outcome.dispenser == 3 && outcome.cancelled);
+    assert(!dispenserIsBusy());
   }
 
   if (ENABLE_PILL_SENSOR)
@@ -159,7 +242,7 @@ int main()
     // -----------------------------------------------------------------------
     // ไม่มีเม็ดตกเลย: ต้องวนหมุน-เขย่าจนครบเพดาน แล้วรายงานว่าได้ไม่ครบ
     // -----------------------------------------------------------------------
-    pulses.clear();
+    clearLog();
     assert(dispenseMedicine(1, 2) == DispenseResult::Started);
 
     for (uint8_t attempt = 0; attempt < MAX_ATTEMPTS_PER_DOSE; ++attempt)
@@ -170,10 +253,10 @@ int main()
       advance(MOVE_TIME_MS);  // Releasing -> Returning
       assert(pulses.size() == before + 1);
 
-      // ช่วงเขย่าต้องไม่สั่ง servo เพิ่ม แต่ต้องสั่นอยู่
       if (attempt + 1 < MAX_ATTEMPTS_PER_DOSE)
       {
         advance(MOVE_TIME_MS);  // Returning -> Shaking
+        // ช่วงเขย่าต้องสั่นอยู่ แต่ไม่สั่ง servo เพิ่ม
         assert(lastVibrationPwm(1) == VIB_KICK_SPEED && lastVibrationDir(1) == LOW);
         const size_t duringShake = pulses.size();
         advance(SHAKE_TIME_MS);  // Shaking -> Releasing รอบใหม่
@@ -225,15 +308,16 @@ int main()
   }
 
   // -------------------------------------------------------------------------
-  // ยกเลิกระหว่างทาง: หยุดทันที ปฏิเสธคำสั่งใหม่ขณะกดค้าง และไม่ทำต่อเมื่อปล่อย
+  // ยกเลิกระหว่างทาง: หยุดทุกจานทันที ปฏิเสธคำสั่งใหม่ขณะกดค้าง และไม่ทำต่อเมื่อปล่อย
   // -------------------------------------------------------------------------
   for (int phase = 0; phase < 3; ++phase)
   {
+    clearLog();
     assert(dispenseMedicine(2, 3) == DispenseResult::Started);
     for (int step = 0; step < phase; ++step)
       advance(MOVE_TIME_MS);
 
-    const auto beforeCancel = pulses.size();
+    const size_t beforeCancel = pulses.size();
     setCancel(true);
     dispenserControlUpdate();
 
@@ -248,6 +332,18 @@ int main()
     setCancel(false);
     advance(MOVE_TIME_MS);
     assert(pulses.size() == beforeCancel);
+  }
+
+  // ยกเลิกขณะสองจานทำงานพร้อมกัน ต้องได้ผลกลับมาครบทั้งสองใบ
+  if (MAX_CONCURRENT_DISPENSERS >= 2)
+  {
+    assert(dispenseMedicine(1, 1) == DispenseResult::Started);
+    assert(dispenseMedicine(2, 1) == DispenseResult::Started);
+    stopDispenser();
+    assert(takeDispenseOutcome(outcome) && outcome.dispenser == 1 && outcome.cancelled);
+    assert(takeDispenseOutcome(outcome) && outcome.dispenser == 2 && outcome.cancelled);
+    assert(!takeDispenseOutcome(outcome));
+    assert(!dispenserIsBusy());
   }
 
   failAttach = true;
@@ -266,7 +362,7 @@ int main()
   // -------------------------------------------------------------------------
   // การคำนวณเวลาต้องทนการวนกลับของ millis()
   // -------------------------------------------------------------------------
-  pulses.clear();
+  clearLog();
   fakeMillis = ULONG_MAX - MOVE_TIME_MS / 2;
   assert(dispenseMedicine(3, 1) == DispenseResult::Started);
   if (ENABLE_PILL_SENSOR)

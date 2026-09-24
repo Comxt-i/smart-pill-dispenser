@@ -27,12 +27,20 @@ void dispenserControlUpdate();
  *
  * จะวนหมุน-เขย่าเป็นรอบๆ จนเซ็นเซอร์นับครบ หรือจนครบ MAX_ATTEMPTS_PER_DOSE
  * ไม่ block — ต้องเรียก dispenserControlUpdate() ทุกลูป
+ *
+ * หลายจานทำงานพร้อมกันได้ถึง MAX_CONCURRENT_DISPENSERS จาน
+ * เกินกว่านั้นจะคืน Busy ผู้เรียกต้องลองใหม่เมื่อ dispenserHasCapacity() เป็น true
  */
 DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills);
+
+/** หยุดทุกจานที่กำลังทำงานอยู่ */
 void stopDispenser();
 
-/** true ขณะกำลังหมุนจานอยู่ */
+/** true ขณะมีจานใดจานหนึ่งกำลังทำงานอยู่ */
 bool dispenserIsBusy();
+
+/** true เมื่อยังรับคำสั่งจ่ายเพิ่มได้อีกอย่างน้อยหนึ่งจาน */
+bool dispenserHasCapacity();
 
 /**
  * ดึงผลของรอบที่เพิ่งจบออกมาหนึ่งครั้ง (คืน false ถ้ายังไม่มีผลใหม่)

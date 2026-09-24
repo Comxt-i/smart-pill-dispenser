@@ -82,6 +82,14 @@ DoseRef scheduleTick(int nowMinutes, uint32_t dayKey, bool justBooted);
 /** มื้อถัดไปของวันนี้ที่ยังไม่ถึงเวลา (ใช้แสดงบน LCD) */
 DoseRef scheduleNextUpcoming(int nowMinutes);
 
+/**
+ * เก็บมื้อยาทุกมื้อที่กำลังเตือนอยู่ตอนนี้ลง out แล้วคืนจำนวนที่เก็บได้
+ *
+ * รอบยาหนึ่งรอบมีได้หลายช่อง ผู้ใช้กดปุ่มครั้งเดียวแล้วจ่ายให้ครบทั้งรอบ
+ * จึงต้องไล่ได้ทั้งหมด ไม่ใช่ได้ทีละมื้อแบบ scheduleTick()
+ */
+uint8_t scheduleAlertingDoses(DoseRef *out, uint8_t maxCount);
+
 /** เปลี่ยนสถานะพร้อมบันทึกลง Serial เพื่อให้ไล่ปัญหาได้ */
 void scheduleSetState(const DoseRef &ref, DoseState state);
 
@@ -92,6 +100,14 @@ void scheduleSetState(const DoseRef &ref, DoseState state);
  * ซึ่งกันไม่ให้ผู้ใช้เลื่อนไปเรื่อยๆ จนกลายเป็นขาดยาโดยไม่รู้ตัว
  */
 bool scheduleSnooze(const DoseRef &ref, int nowMinutes);
+
+/**
+ * ตรวจว่ามื้อนี้เลื่อนได้ไหม โดยไม่เปลี่ยนสถานะอะไร
+ *
+ * มีไว้ให้ตรวจทั้งรอบก่อนลงมือ เพราะการเลื่อนได้บางช่องแล้วทิ้งช่องอื่นไว้
+ * จะทำให้รอบเดียวแตกออกเป็นสองเวลา
+ */
+bool scheduleCanSnooze(const DoseRef &ref, int nowMinutes);
 
 /** จำนวนครั้งที่มื้อนี้ถูกเลื่อน ใช้แนบไปกับผลที่ส่งขึ้น server */
 uint8_t scheduleSnoozeCount(const DoseRef &ref);

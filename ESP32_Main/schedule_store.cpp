@@ -285,6 +285,28 @@ DoseRef scheduleTick(int nowMinutes, uint32_t dayKey, bool justBooted)
   return alerting;
 }
 
+uint8_t scheduleAlertingDoses(DoseRef *out, uint8_t maxCount)
+{
+  if (!out || maxCount == 0)
+    return 0;
+
+  uint8_t found = 0;
+  for (uint8_t s = 0; s < slotCount && found < maxCount; ++s)
+  {
+    const Slot &slot = slots[s];
+    if (!slot.active || slot.medicationId[0] == '\0')
+      continue;
+
+    for (uint8_t d = 0; d < slot.doseCount && found < maxCount; ++d)
+    {
+      if (slot.doses[d].state != DoseState::Alerting)
+        continue;
+      out[found++] = {s, d, true};
+    }
+  }
+  return found;
+}
+
 DoseRef scheduleNextUpcoming(int nowMinutes)
 {
   DoseRef best = {0, 0, false};
@@ -312,31 +334,42 @@ DoseRef scheduleNextUpcoming(int nowMinutes)
   return best;
 }
 
-bool scheduleSnooze(const DoseRef &ref, int nowMinutes)
+bool scheduleCanSnooze(const DoseRef &ref, int nowMinutes)
 {
-  Dose *dose = scheduleDoseAt(ref);
+  const Dose *dose = scheduleDoseAt(ref);
   if (!dose)
     return false;
 
   // เลื่อนได้เฉพาะตอนที่กำลังเตือนอยู่เท่านั้น
   if (dose->state != DoseState::Alerting)
     return false;
-
   if (dose->snoozeCount >= MAX_SNOOZE_PER_DOSE)
+    return false;
+
+  // เลื่อนไปก็จะตื่นหลังหมดเวลาผ่อนผันอยู่ดี จึงไม่ให้เลื่อน
+  return nowMinutes + SNOOZE_MINUTES <= dose->minutes + ALERT_TIMEOUT_MINUTES;
+}
+
+bool scheduleSnooze(const DoseRef &ref, int nowMinutes)
+{
+  Dose *dose = scheduleDoseAt(ref);
+  if (!dose)
+    return false;
+
+  if (!scheduleCanSnooze(ref, nowMinutes))
   {
-    Serial.printf("[มื้อยา] เลื่อนครบ %u ครั้งแล้ว เลื่อนต่อไม่ได้\n",
-                  static_cast<unsigned>(MAX_SNOOZE_PER_DOSE));
+    if (dose->state == DoseState::Alerting)
+    {
+      if (dose->snoozeCount >= MAX_SNOOZE_PER_DOSE)
+        Serial.printf("[มื้อยา] เลื่อนครบ %u ครั้งแล้ว เลื่อนต่อไม่ได้\n",
+                      static_cast<unsigned>(MAX_SNOOZE_PER_DOSE));
+      else
+        Serial.println("[มื้อยา] เลื่อนไม่ได้ เพราะจะเลยเวลาผ่อนผัน");
+    }
     return false;
   }
 
   const int wakeAt = nowMinutes + SNOOZE_MINUTES;
-  if (wakeAt > dose->minutes + ALERT_TIMEOUT_MINUTES)
-  {
-    // เลื่อนไปก็จะตื่นหลังหมดเวลาผ่อนผันอยู่ดี จึงไม่ให้เลื่อน
-    Serial.println("[มื้อยา] เลื่อนไม่ได้ เพราะจะเลยเวลาผ่อนผัน");
-    return false;
-  }
-
   dose->snoozedUntil = wakeAt;
   ++dose->snoozeCount;
   scheduleSetState(ref, DoseState::Snoozed);

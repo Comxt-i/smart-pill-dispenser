@@ -16,31 +16,64 @@ namespace {
  *
  * จังหวะ Shaking จำเป็น เพราะบางครั้งเม็ดยาหลุดจากจานแล้วแต่ยังค้างอยู่ด้านล่าง
  * การหมุนอย่างเดียวไม่ทำให้มันตกลงไป
+ *
+ * WaitingStart ใช้เหลื่อมจังหวะออกตัวเมื่อมีจานอื่นกำลังทำงานอยู่แล้ว
  */
-enum class Phase { Idle, Releasing, Returning, Shaking };
+enum class Phase : uint8_t { Idle, WaitingStart, Releasing, Returning, Shaking };
+
+/** สถานะของจานหนึ่งใบ แยกกันครบทุกตัวเพื่อให้หลายจานทำงานทับเวลากันได้ */
+struct Run {
+  Phase phase = Phase::Idle;
+  uint8_t requestedPills = 0;
+  uint8_t countedPills = 0;
+  uint8_t attempts = 0;
+  unsigned long phaseStartedMs = 0;
+  unsigned long startDelayMs = 0;
+  bool targetReached = false;
+
+  // จังหวะกระตุกมอเตอร์สั่นตอนออกตัว (ไม่ใช้ delay)
+  bool kicking = false;
+  unsigned long kickStartedMs = 0;
+
+  // สถานะเซ็นเซอร์รอบก่อน ใช้จับ "ขอบ" ไม่ใช่ระดับ เม็ดเดียวจะได้ไม่ถูกนับซ้ำ
+  bool sensorWasBlocked = false;
+  unsigned long lastDetectMs = 0;
+};
 
 Servo dispenserServos[DISPENSER_COUNT];
-Phase phase = Phase::Idle;
+Run runs[DISPENSER_COUNT];
 
-uint8_t activeIndex = 0;
-uint8_t requestedPills = 0;
-uint8_t countedPills = 0;
-uint8_t attempts = 0;
-unsigned long phaseStartedMs = 0;
+/**
+ * คิวผลลัพธ์แบบวงแหวน
+ *
+ * ต้องเป็นคิวไม่ใช่ตัวแปรเดี่ยว เพราะหลายจานจบพร้อมกันได้
+ * ขนาดเท่าจำนวนจานจึงพอเสมอ ต่อให้ทุกจานจบในรอบ loop เดียวกัน
+ */
+DispenseOutcome outcomes[DISPENSER_COUNT];
+uint8_t outcomeHead = 0;
+uint8_t outcomeCount = 0;
 
-// true เมื่อได้เม็ดครบแล้ว เหลือแค่พาจานกลับตำแหน่งพักให้เรียบร้อยก่อนจบ
-bool targetReached = false;
+void pushOutcome(const DispenseOutcome &outcome)
+{
+  if (outcomeCount >= DISPENSER_COUNT)
+    return;  // เป็นไปไม่ได้ในทางปฏิบัติ แต่กันไว้ไม่ให้เขียนทับของที่ยังไม่ถูกอ่าน
 
-// จังหวะกระตุกมอเตอร์สั่นตอนออกตัว (ไม่ใช้ delay)
-bool kicking = false;
-unsigned long kickStartedMs = 0;
+  const uint8_t tail = static_cast<uint8_t>((outcomeHead + outcomeCount) % DISPENSER_COUNT);
+  outcomes[tail] = outcome;
+  ++outcomeCount;
+}
 
-// สถานะเซ็นเซอร์รอบก่อน ใช้จับ "ขอบ" ไม่ใช่ระดับ เม็ดเดียวจะได้ไม่ถูกนับซ้ำ
-bool sensorWasBlocked[DISPENSER_COUNT] = {false};
-unsigned long lastDetectMs = 0;
-
-DispenseOutcome lastOutcome = {0, 0, 0, 0, false, false};
-bool outcomePending = false;
+/** จำนวนจานที่กำลังทำงานอยู่ รวมถึงจานที่รอคิวออกตัว */
+uint8_t activeCount()
+{
+  uint8_t count = 0;
+  for (uint8_t index = 0; index < DISPENSER_COUNT; ++index)
+  {
+    if (runs[index].phase != Phase::Idle)
+      ++count;
+  }
+  return count;
+}
 
 // ---------------------------------------------------------------------------
 // มอเตอร์สั่น (DRV8833)
@@ -50,39 +83,40 @@ bool outcomePending = false;
 // เพราะบน ESP32 การ analogWrite จะผูกขานั้นเข้ากับ LEDC แล้ว digitalWrite ภายหลัง
 // อาจไม่มีผล ทำให้มอเตอร์ไม่ดับตามสั่ง
 
-void vibrateOn(uint8_t index)
+void vibrateOn(uint8_t index, unsigned long now)
 {
   digitalWrite(VIB_DIR_PINS[index], LOW);
   analogWrite(VIB_PWM_PINS[index], VIB_KICK_SPEED);
-  kicking = true;
-  kickStartedMs = millis();
+  runs[index].kicking = true;
+  runs[index].kickStartedMs = now;
 }
 
 /** IN1 = IN2 = HIGH คือเบรกแบบล็อกแกน กันตุ้มถ่วงเหวี่ยงต่อ */
 void vibrateBrake(uint8_t index)
 {
-  kicking = false;
+  runs[index].kicking = false;
   digitalWrite(VIB_DIR_PINS[index], HIGH);
   analogWrite(VIB_PWM_PINS[index], 255);
 }
 
 void vibrateOff(uint8_t index)
 {
-  kicking = false;
+  runs[index].kicking = false;
   digitalWrite(VIB_DIR_PINS[index], LOW);
   analogWrite(VIB_PWM_PINS[index], 0);
 }
 
 /** ผ่อนกำลังจากจังหวะกระตุกลงมาที่ความแรงปกติ */
-void tickKick()
+void tickKick(uint8_t index, unsigned long now)
 {
-  if (!kicking)
+  Run &run = runs[index];
+  if (!run.kicking)
     return;
-  if (millis() - kickStartedMs < VIB_KICK_MS)
+  if (now - run.kickStartedMs < VIB_KICK_MS)
     return;
 
-  analogWrite(VIB_PWM_PINS[activeIndex], VIB_SPEED);
-  kicking = false;
+  analogWrite(VIB_PWM_PINS[index], VIB_SPEED);
+  run.kicking = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -96,115 +130,176 @@ bool readSensor(uint8_t index)
 }
 
 /**
- * นับเม็ดที่เพิ่งตกผ่านลำแสง
+ * นับเม็ดที่เพิ่งตกผ่านลำแสงของจานนี้
  *
  * จับเฉพาะขอบขาลง (ว่าง -> ถูกบัง) และล็อกไว้ PILL_DETECT_LOCKOUT_MS
  * เพื่อไม่ให้เม็ดเดียวที่กระเด้งหรือหมุนตัวถูกนับหลายครั้ง
+ *
+ * ทุกตัวนับแยกรายจาน จานที่ทำงานพร้อมกันจึงไม่กวนกัน
  */
-void pollSensor()
+void pollSensor(uint8_t index, unsigned long now)
 {
   if (!ENABLE_PILL_SENSOR)
     return;
 
-  const bool blocked = readSensor(activeIndex);
-  const bool wasBlocked = sensorWasBlocked[activeIndex];
-  sensorWasBlocked[activeIndex] = blocked;
+  Run &run = runs[index];
+  const bool blocked = readSensor(index);
+  const bool wasBlocked = run.sensorWasBlocked;
+  run.sensorWasBlocked = blocked;
 
   if (!blocked || wasBlocked)
     return;
-  if (millis() - lastDetectMs < PILL_DETECT_LOCKOUT_MS)
+  if (now - run.lastDetectMs < PILL_DETECT_LOCKOUT_MS)
     return;
 
-  lastDetectMs = millis();
-  if (countedPills < 255)
-    ++countedPills;
+  run.lastDetectMs = now;
+  if (run.countedPills < 255)
+    ++run.countedPills;
 
   Serial.printf("[IR] จาน %u ตรวจพบเม็ดที่ %u/%u\n",
-                static_cast<unsigned>(activeIndex + 1),
-                static_cast<unsigned>(countedPills),
-                static_cast<unsigned>(requestedPills));
+                static_cast<unsigned>(index + 1),
+                static_cast<unsigned>(run.countedPills),
+                static_cast<unsigned>(run.requestedPills));
 
-  if (countedPills >= requestedPills)
-    targetReached = true;
+  if (run.countedPills >= run.requestedPills)
+    run.targetReached = true;
 }
 
 // ---------------------------------------------------------------------------
 
-void detachAll()
+/** ปิดรอบการทำงานของจานหนึ่งและเก็บผลเข้าคิวให้ loop หลักมาอ่าน */
+void finishRun(uint8_t index, bool cancelled)
 {
-  for (uint8_t index = 0; index < DISPENSER_COUNT; ++index)
-  {
-    if (dispenserServos[index].attached())
-      dispenserServos[index].detach();
-  }
-}
-
-/** ปิดรอบการทำงานปัจจุบันและเก็บผลไว้ให้ loop หลักมาอ่าน */
-void finishRun(bool cancelled)
-{
-  const bool wasRunning = phase != Phase::Idle;
-
-  if (wasRunning)
-    vibrateOff(activeIndex);
-  detachAll();
-  phase = Phase::Idle;
-
-  if (!wasRunning)
+  Run &run = runs[index];
+  if (run.phase == Phase::Idle)
     return;
 
-  lastOutcome.dispenser = static_cast<uint8_t>(activeIndex + 1);
-  lastOutcome.requestedPills = requestedPills;
-  lastOutcome.attempts = attempts;
-  lastOutcome.cancelled = cancelled;
-  lastOutcome.sensorVerified = ENABLE_PILL_SENSOR;
+  vibrateOff(index);
+  if (dispenserServos[index].attached())
+    dispenserServos[index].detach();
+  run.phase = Phase::Idle;
+
+  DispenseOutcome outcome;
+  outcome.dispenser = static_cast<uint8_t>(index + 1);
+  outcome.requestedPills = run.requestedPills;
+  outcome.attempts = run.attempts;
+  outcome.cancelled = cancelled;
+  outcome.sensorVerified = ENABLE_PILL_SENSOR;
 
   // ไม่มีเซ็นเซอร์ = เชื่อว่าหมุนครบรอบแล้วยาออกครบ ซึ่งยืนยันไม่ได้
   // sensorVerified บอก pill_app ให้ติดป้ายไว้ในบันทึกว่าไม่ได้ตรวจจริง
-  lastOutcome.dispensedPills =
-      ENABLE_PILL_SENSOR ? countedPills : (cancelled ? 0 : requestedPills);
+  outcome.dispensedPills =
+      ENABLE_PILL_SENSOR ? run.countedPills : (cancelled ? 0 : run.requestedPills);
 
-  outcomePending = true;
+  pushOutcome(outcome);
 }
 
-void beginPhase(Phase next)
+void beginPhase(uint8_t index, Phase next, unsigned long now)
 {
-  Servo &servo = dispenserServos[activeIndex];
+  Servo &servo = dispenserServos[index];
+  Run &run = runs[index];
 
   switch (next)
   {
     case Phase::Releasing:
-      ++attempts;
-      vibrateOn(activeIndex);
-      servo.writeMicroseconds(RELEASE_PULSE_US[activeIndex]);
+      ++run.attempts;
+      vibrateOn(index, now);
+      servo.writeMicroseconds(RELEASE_PULSE_US[index]);
       break;
 
     case Phase::Returning:
-      vibrateBrake(activeIndex);
-      servo.writeMicroseconds(REST_PULSE_US[activeIndex]);
+      vibrateBrake(index);
+      servo.writeMicroseconds(REST_PULSE_US[index]);
       break;
 
     case Phase::Shaking:
       // จานอยู่ที่ตำแหน่งพักแล้ว ไม่สั่ง servo ซ้ำ ให้สั่นอย่างเดียว
-      vibrateOn(activeIndex);
+      vibrateOn(index, now);
       break;
 
+    case Phase::WaitingStart:
     case Phase::Idle:
       break;
   }
 
-  phase = next;
-  phaseStartedMs = millis();
+  run.phase = next;
+  run.phaseStartedMs = now;
+}
+
+/** เดินสถานะของจานหนึ่งใบ */
+void updateRun(uint8_t index, unsigned long now)
+{
+  Run &run = runs[index];
+  if (run.phase == Phase::Idle)
+    return;
+
+  tickKick(index, now);
+  pollSensor(index, now);
+
+  const unsigned long elapsed = now - run.phaseStartedMs;
+
+  switch (run.phase)
+  {
+    case Phase::WaitingStart:
+      if (elapsed >= run.startDelayMs)
+        beginPhase(index, Phase::Releasing, now);
+      return;
+
+    case Phase::Releasing:
+      if (elapsed < MOVE_TIME_MS)
+        return;
+      // ถึงปลายทางแล้ว ต้องพาจานกลับตำแหน่งพักเสมอ แม้จะได้เม็ดครบแล้วก็ตาม
+      beginPhase(index, Phase::Returning, now);
+      return;
+
+    case Phase::Returning:
+      if (elapsed < MOVE_TIME_MS)
+        return;
+
+      if (run.targetReached)
+      {
+        finishRun(index, false);
+        return;
+      }
+      if (run.attempts >= MAX_ATTEMPTS_PER_DOSE)
+      {
+        Serial.printf("[จ่ายยา] จาน %u หมุนครบ %u รอบแล้วยังได้ไม่ครบ (%u/%u เม็ด)\n",
+                      static_cast<unsigned>(index + 1),
+                      static_cast<unsigned>(run.attempts),
+                      static_cast<unsigned>(run.countedPills),
+                      static_cast<unsigned>(run.requestedPills));
+        finishRun(index, false);
+        return;
+      }
+
+      beginPhase(index, Phase::Shaking, now);
+      return;
+
+    case Phase::Shaking:
+      if (elapsed < SHAKE_TIME_MS)
+        return;
+
+      // เม็ดอาจหลุดตอนเขย่านี่เอง จึงต้องเช็คอีกครั้งก่อนหมุนรอบใหม่
+      if (run.targetReached)
+      {
+        finishRun(index, false);
+        return;
+      }
+      beginPhase(index, Phase::Releasing, now);
+      return;
+
+    case Phase::Idle:
+      return;
+  }
 }
 
 }  // namespace
 
 void dispenserControlBegin()
 {
-  finishRun(false);
-  outcomePending = false;
-
   for (uint8_t index = 0; index < DISPENSER_COUNT; ++index)
   {
+    finishRun(index, false);
     dispenserServos[index].setPeriodHertz(50);
 
     pinMode(VIB_PWM_PINS[index], OUTPUT);
@@ -214,8 +309,11 @@ void dispenserControlBegin()
     // GPIO34-39 เป็นขาอินพุตอย่างเดียวและ **ไม่มี pull-up ในตัวชิป**
     // โมดูล IR ต้องขับสัญญาณเองแบบ push-pull ไม่อย่างนั้นต้องใส่ตัวต้านทาน pull-up ภายนอก
     pinMode(PILL_SENSOR_PINS[index], INPUT);
-    sensorWasBlocked[index] = ENABLE_PILL_SENSOR ? readSensor(index) : false;
+    runs[index].sensorWasBlocked = ENABLE_PILL_SENSOR ? readSensor(index) : false;
   }
+
+  outcomeHead = 0;
+  outcomeCount = 0;
 }
 
 DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills)
@@ -226,116 +324,89 @@ DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills)
     return DispenseResult::Cancelled;
   if (!ENABLE_SERVO_MOVEMENT)
     return DispenseResult::Disabled;
-  if (phase != Phase::Idle)
+
+  const uint8_t index = static_cast<uint8_t>(dispenser - 1);
+  if (runs[index].phase != Phase::Idle)
     return DispenseResult::Busy;
 
-  activeIndex = dispenser - 1;
-  Servo &servo = dispenserServos[activeIndex];
-  servo.attach(SERVO_PINS[activeIndex], SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
+  // เต็มเพดานแล้ว ผู้เรียกต้องลองใหม่เมื่อมีจานว่าง
+  const uint8_t running = activeCount();
+  if (running >= MAX_CONCURRENT_DISPENSERS)
+    return DispenseResult::Busy;
+
+  Servo &servo = dispenserServos[index];
+  servo.attach(SERVO_PINS[index], SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
   if (!servo.attached())
     return DispenseResult::ServoError;
 
-  requestedPills = pills;
-  countedPills = 0;
-  attempts = 0;
-  targetReached = false;
+  Run &run = runs[index];
+  run.requestedPills = pills;
+  run.countedPills = 0;
+  run.attempts = 0;
+  run.targetReached = false;
+
+  const unsigned long now = millis();
 
   // ช่วงกันนับซ้ำมีไว้กันเม็ดเดียวถูกนับหลายครั้ง จึงต้องนับจากเม็ดก่อนหน้า "ในรอบนี้"
   // ถ้าปล่อยให้ค้างจากรอบก่อน (หรือค้างที่ 0 ตอนเพิ่งบูต) เม็ดแรกของรอบจะถูกกลืนหายไป
-  lastDetectMs = millis() - PILL_DETECT_LOCKOUT_MS - 1;
+  run.lastDetectMs = now - PILL_DETECT_LOCKOUT_MS - 1;
 
   // อ่านสถานะเริ่มต้นไว้ ไม่งั้นถ้าลำแสงถูกบังค้างอยู่ตั้งแต่ต้น
   // ขอบขาลงแรกจะถูกนับทั้งที่ไม่มีเม็ดยาตกใหม่
   if (ENABLE_PILL_SENSOR)
-    sensorWasBlocked[activeIndex] = readSensor(activeIndex);
+    run.sensorWasBlocked = readSensor(index);
 
-  beginPhase(Phase::Releasing);
+  if (running == 0)
+  {
+    beginPhase(index, Phase::Releasing, now);
+  }
+  else
+  {
+    // มีจานอื่นออกตัวไปแล้ว เหลื่อมจังหวะไม่ให้กระแสพุ่งซ้อนกัน
+    run.startDelayMs = DISPENSE_STAGGER_MS;
+    beginPhase(index, Phase::WaitingStart, now);
+  }
+
   return DispenseResult::Started;
 }
 
 void dispenserControlUpdate()
 {
-  if (phase == Phase::Idle)
-    return;
-
   if (digitalRead(CANCEL_BUTTON_PIN) == LOW)
   {
-    finishRun(true);
+    stopDispenser();
     return;
   }
 
-  tickKick();
-  pollSensor();
-
-  const unsigned long elapsed = millis() - phaseStartedMs;
-
-  switch (phase)
-  {
-    case Phase::Releasing:
-      if (elapsed < MOVE_TIME_MS)
-        return;
-      // ถึงปลายทางแล้ว ต้องพาจานกลับตำแหน่งพักเสมอ แม้จะได้เม็ดครบแล้วก็ตาม
-      beginPhase(Phase::Returning);
-      return;
-
-    case Phase::Returning:
-      if (elapsed < MOVE_TIME_MS)
-        return;
-
-      if (targetReached)
-      {
-        finishRun(false);
-        return;
-      }
-      if (attempts >= MAX_ATTEMPTS_PER_DOSE)
-      {
-        Serial.printf("[จ่ายยา] จาน %u หมุนครบ %u รอบแล้วยังได้ไม่ครบ (%u/%u เม็ด)\n",
-                      static_cast<unsigned>(activeIndex + 1),
-                      static_cast<unsigned>(attempts),
-                      static_cast<unsigned>(countedPills),
-                      static_cast<unsigned>(requestedPills));
-        finishRun(false);
-        return;
-      }
-
-      beginPhase(Phase::Shaking);
-      return;
-
-    case Phase::Shaking:
-      if (elapsed < SHAKE_TIME_MS)
-        return;
-
-      // เม็ดอาจหลุดตอนเขย่านี่เอง จึงต้องเช็คอีกครั้งก่อนหมุนรอบใหม่
-      if (targetReached)
-      {
-        finishRun(false);
-        return;
-      }
-      beginPhase(Phase::Releasing);
-      return;
-
-    case Phase::Idle:
-      return;
-  }
+  const unsigned long now = millis();
+  for (uint8_t index = 0; index < DISPENSER_COUNT; ++index)
+    updateRun(index, now);
 }
 
 void stopDispenser()
 {
-  finishRun(phase != Phase::Idle);
+  for (uint8_t index = 0; index < DISPENSER_COUNT; ++index)
+    finishRun(index, true);
 }
 
 bool dispenserIsBusy()
 {
-  return phase != Phase::Idle;
+  return activeCount() > 0;
+}
+
+bool dispenserHasCapacity()
+{
+  return activeCount() < MAX_CONCURRENT_DISPENSERS;
 }
 
 bool takeDispenseOutcome(DispenseOutcome &outcome)
 {
-  if (!outcomePending)
+  if (outcomeCount == 0)
     return false;
 
-  outcome = lastOutcome;
-  outcomePending = false;
+  outcome = outcomes[outcomeHead];
+  outcomeHead = static_cast<uint8_t>((outcomeHead + 1) % DISPENSER_COUNT);
+  --outcomeCount;
   return true;
 }
 

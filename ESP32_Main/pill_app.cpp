@@ -19,12 +19,19 @@ namespace {
 enum class RunOwner : uint8_t { None, Dose, Command };
 
 DoseRef activeAlert = {0, 0, false};
-RunOwner runOwner = RunOwner::None;
-RemoteCommand runningCommand;
+
+// สถานะแยกรายจาน เพราะจ่ายพร้อมกันได้ถึง MAX_CONCURRENT_DISPENSERS จาน
+RunOwner runOwner[DISPENSER_COUNT] = {};
+RemoteCommand runningCommand[DISPENSER_COUNT];
 
 // อ้างอิงมื้อยาที่กำลังจ่ายด้วย schedule_id ไม่ใช่ index เพราะอาจมี sync คั่นระหว่างที่จานหมุน
 // แล้วทำให้ลำดับของมื้อยาเปลี่ยนไป
-char runningScheduleId[40] = "";
+char runningScheduleId[DISPENSER_COUNT][40] = {};
+
+// มื้อที่ผู้ใช้กดรับแล้วแต่ยังไม่มีจานว่าง รอจนกว่าจะมีที่
+// เก็บเป็น schedule_id ด้วยเหตุผลเดียวกับด้านบน
+char pendingDoseId[DISPENSER_COUNT][40] = {};
+uint8_t pendingDoseCount = 0;
 
 bool clockWasValid = false;
 bool firstTickAfterClock = true;
@@ -192,13 +199,18 @@ const char *reasonCode(DispenseResult result)
   return "unknown";
 }
 
-/** ผู้ใช้กดปุ่มรับยาขณะที่มื้อนั้นกำลังเตือน */
-void startDoseDispense(const DoseRef &ref)
+/**
+ * เริ่มจ่ายมื้อนี้
+ *
+ * คืน true เมื่อจัดการมื้อนี้เรียบร้อยแล้ว ไม่ว่าจะเริ่มหมุนได้หรือรายงานความล้มเหลวไปแล้ว
+ * คืน false เฉพาะตอนที่ยังไม่มีจานว่าง ผู้เรียกต้องเก็บไว้ลองใหม่รอบถัดไป
+ */
+bool startDoseDispense(const DoseRef &ref)
 {
   const Slot *slot = scheduleSlotOf(ref);
   Dose *dose = scheduleDoseAt(ref);
   if (!slot || !dose)
-    return;
+    return true;
 
   const DispenseResult result = dispenseMedicine(slot->number, pillsFor(slot->amountPerDose));
 
@@ -212,8 +224,13 @@ void startDoseDispense(const DoseRef &ref)
     reportDose(ref, "DISPENSED", "dry run");
     // ตั้งสถานะตรงๆ เพื่อไม่ให้ callback ส่ง DISPENSED ซ้ำอีกใบ
     dose->state = DoseState::Done;
-    return;
+    return true;
   }
+
+  // จานยังไม่ว่าง (จานนี้กำลังทำงาน หรือเต็มเพดานพร้อมกัน)
+  // ถือเป็นการรอ ไม่ใช่ความล้มเหลว จึงไม่รายงานอะไรและให้ผู้เรียกลองใหม่
+  if (result == DispenseResult::Busy)
+    return false;
 
   if (result != DispenseResult::Started)
   {
@@ -227,15 +244,122 @@ void startDoseDispense(const DoseRef &ref)
       dose->failureReported = true;
       reportDose(ref, "FAILED", reasonCode(result));
     }
-    return;
+    return true;
   }
 
-  strncpy(runningScheduleId, dose->scheduleId, sizeof(runningScheduleId) - 1);
-  runningScheduleId[sizeof(runningScheduleId) - 1] = '\0';
-  runOwner = RunOwner::Dose;
+  const uint8_t index = static_cast<uint8_t>(slot->number - 1);
+  strncpy(runningScheduleId[index], dose->scheduleId, sizeof(runningScheduleId[0]) - 1);
+  runningScheduleId[index][sizeof(runningScheduleId[0]) - 1] = '\0';
+  runOwner[index] = RunOwner::Dose;
   scheduleSetState(ref, DoseState::Dispensing);
   alertSet(AlertPattern::None);
   lcdShowMessage(slot->name, "Dispensing...");
+  return true;
+}
+
+/** ลบรายการที่ index ออกจากคิว โดยเลื่อนของที่เหลือขึ้นมา */
+void removePendingAt(uint8_t index)
+{
+  for (uint8_t i = index; i + 1 < pendingDoseCount; ++i)
+    memcpy(pendingDoseId[i], pendingDoseId[i + 1], sizeof(pendingDoseId[0]));
+  --pendingDoseCount;
+}
+
+/**
+ * เริ่มจ่ายมื้อที่ค้างคิวอยู่เท่าที่จานว่าง — เรียกทุกลูป
+ *
+ * ทำให้ช่องที่สามเริ่มเองทันทีที่ช่องแรกจ่ายเสร็จ โดยผู้ใช้ไม่ต้องกดปุ่มซ้ำ
+ */
+void startPendingDoses()
+{
+  for (uint8_t i = 0; i < pendingDoseCount;)
+  {
+    if (!dispenserHasCapacity())
+      return;
+
+    const DoseRef ref = scheduleFindByScheduleId(pendingDoseId[i]);
+    const Dose *dose = scheduleDoseAt(ref);
+
+    // มื้อหายไปหลัง sync หรือเปลี่ยนสถานะไปแล้ว (เช่นผู้ใช้กดข้าม) -> ทิ้งจากคิว
+    const bool stillWaiting = dose && dose->state == DoseState::Alerting;
+    if (stillWaiting && !startDoseDispense(ref))
+      return;  // จานที่ต้องใช้ยังไม่ว่าง เก็บไว้ลองใหม่รอบหน้า
+
+    removePendingAt(i);
+  }
+}
+
+/**
+ * ผู้ใช้กดปุ่มเขียว: รับยา **ทั้งรอบ** ในครั้งเดียว
+ *
+ * รอบหนึ่งมีได้หลายช่อง ถ้าให้กดทีละช่อง ผู้สูงอายุมีโอกาสลืมกดช่องท้ายๆ แล้วยาขาดไปเลย
+ */
+void acceptRound()
+{
+  DoseRef alerting[DISPENSER_COUNT];
+  const uint8_t count = scheduleAlertingDoses(alerting, DISPENSER_COUNT);
+  if (count == 0)
+    return;
+
+  // เงียบเสียงเตือนทันทีที่ผู้ใช้ตอบรับ ไม่ต้องรอให้จานแรกเริ่มหมุน
+  alertSet(AlertPattern::None);
+
+  pendingDoseCount = 0;
+  for (uint8_t i = 0; i < count; ++i)
+  {
+    const Dose *dose = scheduleDoseAt(alerting[i]);
+    if (!dose)
+      continue;
+    strncpy(pendingDoseId[pendingDoseCount], dose->scheduleId, sizeof(pendingDoseId[0]) - 1);
+    pendingDoseId[pendingDoseCount][sizeof(pendingDoseId[0]) - 1] = '\0';
+    ++pendingDoseCount;
+  }
+
+  startPendingDoses();
+}
+
+/**
+ * เลื่อนทั้งรอบ
+ *
+ * ถ้ามีมื้อใดเลื่อนไม่ได้ จะไม่เลื่อนสักมื้อ เพราะเลื่อนได้บางช่องแล้วทิ้งช่องอื่นไว้
+ * จะทำให้รอบเดียวแตกออกเป็นสองเวลา ซึ่งขัดกับที่ปุ่มเขียวรับทั้งรอบในครั้งเดียว
+ *
+ * ทุกมื้อในรอบเดียวกันมีเวลาเท่ากันและถูกเลื่อนพร้อมกันเสมอ ปกติจึงตอบเหมือนกันทั้งรอบอยู่แล้ว
+ */
+bool snoozeRound()
+{
+  DoseRef alerting[DISPENSER_COUNT];
+  const uint8_t count = scheduleAlertingDoses(alerting, DISPENSER_COUNT);
+  if (count == 0)
+    return false;
+
+  const int now = rtcMinutesOfDay();
+  for (uint8_t i = 0; i < count; ++i)
+  {
+    if (!scheduleCanSnooze(alerting[i], now))
+      return false;
+  }
+
+  for (uint8_t i = 0; i < count; ++i)
+    scheduleSnooze(alerting[i], now);
+
+  // มื้อที่ค้างคิวอยู่ถูกเลื่อนไปแล้ว ไม่ต้องรอจานว่างอีก
+  pendingDoseCount = 0;
+  return true;
+}
+
+/** ข้ามทั้งรอบ */
+uint8_t skipRound()
+{
+  DoseRef alerting[DISPENSER_COUNT];
+  const uint8_t count = scheduleAlertingDoses(alerting, DISPENSER_COUNT);
+
+  // callback ของ scheduleSetState จะส่ง SKIPPED ขึ้น server ให้เองทีละมื้อ
+  for (uint8_t i = 0; i < count; ++i)
+    scheduleSetState(alerting[i], DoseState::Skipped);
+
+  pendingDoseCount = 0;
+  return count;
 }
 
 void startCommandDispense(const RemoteCommand &command)
@@ -249,21 +373,30 @@ void startCommandDispense(const RemoteCommand &command)
     return;
   }
 
-  runningCommand = command;
-  runOwner = RunOwner::Command;
+  const uint8_t index = static_cast<uint8_t>(command.slot - 1);
+  runningCommand[index] = command;
+  runOwner[index] = RunOwner::Command;
   lcdShowMessage("From website", "Dispensing...");
 }
 
-/** ตรวจว่ารอบที่กำลังหมุนจบหรือยัง แล้วรายงานผลตามเจ้าของรอบนั้น */
+/**
+ * ตรวจว่ารอบที่กำลังหมุนจบหรือยัง แล้วรายงานผลตามเจ้าของรอบนั้น
+ *
+ * อ่านจากคิวทีละใบ เพราะหลายจานจบพร้อมกันได้
+ */
 void handleDispenseOutcome()
 {
   DispenseOutcome outcome;
   if (!takeDispenseOutcome(outcome))
     return;
 
+  const uint8_t index = static_cast<uint8_t>(outcome.dispenser - 1);
+  if (index >= DISPENSER_COUNT)
+    return;
+
   const bool complete = !outcome.cancelled && outcome.dispensedPills >= outcome.requestedPills;
-  const RunOwner owner = runOwner;
-  runOwner = RunOwner::None;
+  const RunOwner owner = runOwner[index];
+  runOwner[index] = RunOwner::None;
 
   // ไม่ได้ตรวจด้วย IR = รู้แค่ว่าสั่งหมุนไปแล้ว ยืนยันไม่ได้ว่าเม็ดยาออกมาจริง
   // ต้องติดป้ายไว้ในบันทึก เพื่อไม่ให้ประวัติหลอกว่ายืนยันแล้ว
@@ -280,8 +413,8 @@ void handleDispenseOutcome()
   if (owner == RunOwner::Dose)
   {
     // ค้นใหม่จาก schedule_id เผื่อมี sync เปลี่ยนตารางระหว่างที่จานกำลังหมุน
-    const DoseRef ref = scheduleFindByScheduleId(runningScheduleId);
-    runningScheduleId[0] = '\0';
+    const DoseRef ref = scheduleFindByScheduleId(runningScheduleId[index]);
+    runningScheduleId[index][0] = '\0';
 
     Dose *dose = scheduleDoseAt(ref);
     if (!dose)
@@ -325,7 +458,7 @@ void handleDispenseOutcome()
   if (owner == RunOwner::Command)
   {
     alertOneShot(complete ? AlertPattern::Success : AlertPattern::Warning);
-    reportCommand(runningCommand,
+    reportCommand(runningCommand[index],
                   complete ? "DISPENSED" : "FAILED",
                   complete ? unverified : "not enough pills");
   }
@@ -342,10 +475,10 @@ void handleButtons()
 
   if (buttonPressed(ButtonId::Dispense))
   {
-    if (alerting && !dispenserIsBusy())
+    if (alerting)
     {
       alertOneShot(AlertPattern::Click);
-      startDoseDispense(activeAlert);
+      acceptRound();
     }
     else
     {
@@ -358,8 +491,8 @@ void handleButtons()
   {
     if (alerting)
     {
-      // ปุ่มเหลือง: ยังไม่สะดวกตอนนี้ ขอเลื่อนไปอีก SNOOZE_MINUTES นาที
-      if (scheduleSnooze(activeAlert, rtcMinutesOfDay()))
+      // ปุ่มเหลือง: ยังไม่สะดวกตอนนี้ ขอเลื่อนทั้งรอบไปอีก SNOOZE_MINUTES นาที
+      if (snoozeRound())
       {
         alertOneShot(AlertPattern::Click);
         char notice[24];
@@ -392,6 +525,11 @@ void handleButtons()
   {
     cancelPressActive = false;
     stopDispenser();
+
+    // ต้องล้างคิวด้วย ไม่อย่างนั้นช่องที่รอจานว่างอยู่จะถูก startPendingDoses()
+    // สั่งออกตัวใหม่ทันทีในลูปถัดไป กลายเป็นหยุดไม่ได้จริง
+    pendingDoseCount = 0;
+
     alertOneShot(AlertPattern::Warning);
     showNotice("STOPPED");
   }
@@ -401,9 +539,10 @@ void handleButtons()
     cancelPressActive = false;
     if (millis() - cancelPressedAtMs < CANCEL_HOLD_MS && alerting)
     {
+      // ปุ่มแดงกดสั้น: ข้ามทั้งรอบ ให้สอดคล้องกับปุ่มเขียวที่รับทั้งรอบ
       alertOneShot(AlertPattern::Click);
       showNotice("SKIPPED");
-      scheduleSetState(activeAlert, DoseState::Skipped);
+      skipRound();
     }
   }
 }
@@ -748,8 +887,11 @@ void appLoop()
   handleDispenseOutcome();
   handleButtons();
 
-  // คำสั่งจากเว็บทำได้เฉพาะตอนที่กลไกว่างและไม่มีมื้อยากำลังเตือนค้างอยู่
-  if (!dispenserIsBusy() && runOwner == RunOwner::None)
+  // ช่องที่รอคิวอยู่เริ่มเองทันทีที่มีจานว่าง ผู้ใช้จึงกดปุ่มครั้งเดียวพอ
+  startPendingDoses();
+
+  // คำสั่งจากเว็บทำได้เฉพาะตอนที่กลไกว่างและไม่มีมื้อยาค้างคิวอยู่
+  if (!dispenserIsBusy() && pendingDoseCount == 0)
   {
     RemoteCommand command;
     if (netSyncTakeCommand(command))
@@ -809,11 +951,12 @@ const char *appManualDispense(uint8_t slotNumber, float amount, int &httpStatus)
   }
 
   // ใช้เส้นทางเดียวกับคำสั่งจากเว็บ เพื่อให้ผลถูกบันทึกขึ้น server เหมือนกัน
-  memset(&runningCommand, 0, sizeof(runningCommand));
-  strncpy(runningCommand.type, "DISPENSE", sizeof(runningCommand.type) - 1);
-  runningCommand.slot = slotNumber;
-  runningCommand.amount = requested;
-  runOwner = RunOwner::Command;
+  const uint8_t index = static_cast<uint8_t>(slotNumber - 1);
+  memset(&runningCommand[index], 0, sizeof(runningCommand[0]));
+  strncpy(runningCommand[index].type, "DISPENSE", sizeof(runningCommand[0].type) - 1);
+  runningCommand[index].slot = slotNumber;
+  runningCommand[index].amount = requested;
+  runOwner[index] = RunOwner::Command;
 
   httpStatus = 202;
   return "เริ่มจ่ายยาแล้ว (ยังไม่ได้ยืนยันจำนวนเม็ดด้วย IR)";
