@@ -1,6 +1,15 @@
 // Stub สำหรับตรวจไวยากรณ์บนคอมพิวเตอร์เท่านั้น ไม่ใช่การจำลองพฤติกรรมของบอร์ด
 #pragma once
 
+// Tests that compile straight from ESP32_Main must not depend on whatever
+// hardware.local.h this machine has. (Tests that ship their own profile copy
+// config.h into a temp dir and use tests/stubs, which must NOT define this.)
+// config.h includes <Arduino.h> right before hardware_profile.h, so defining this
+// here makes every test deterministic; the real Arduino.h never defines it.
+#ifndef PILLBOX_IGNORE_LOCAL_PROFILE
+#define PILLBOX_IGNORE_LOCAL_PROFILE 1
+#endif
+
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>

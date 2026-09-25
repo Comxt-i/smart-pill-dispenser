@@ -1,6 +1,7 @@
 #include "rtc_lcd.h"
 #include "config.h"
 #include "marquee.h"
+#include "software_clock.h"
 
 #include <DS1307RTC.h>
 #include <LiquidCrystal_I2C.h>
@@ -13,26 +14,10 @@ LiquidCrystal_I2C lcdMedicine(LCD_MEDICINE_ADDRESS, LCD_MEDICINE_COLS, LCD_MEDIC
 
 tmElements_t currentTime;
 bool clockValid = false;
+SoftwareClock softwareClock;
+const char *clockSource = "WAITING";
 bool timeLcdPresent = false, medicineLcdPresent = false, rtcPresent = false;
 unsigned long lastRefreshMs = 0;
-
-// นาฬิกาสำรองในซอฟต์แวร์ ใช้เมื่อไม่พบ DS1307
-//
-// ถ้าไม่มีตัวนี้ เครื่องที่ชิปนาฬิกาเสียจะค้างที่ "Clock not set" ตลอดไป
-// ทั้งที่ server ส่งเวลามาให้ทุกรอบ sync อยู่แล้ว ซึ่งทำให้กล่องใช้งานไม่ได้เลย
-//
-// ข้อเสียที่ยอมรับ: ไม่มีถ่านสำรอง เวลาหายทุกครั้งที่ไฟดับ
-// กล่องจะไม่รู้เวลาจนกว่าจะ sync กับ server สำเร็จครั้งแรกหลังเปิดเครื่อง
-uint32_t softEpoch = 0;          // เวลาที่ได้รับมาครั้งล่าสุด (0 = ยังไม่เคยได้)
-unsigned long softEpochSetMs = 0;  // millis() ตอนที่รับค่านั้นมา
-
-/** เวลาปัจจุบันตามนาฬิกาสำรอง หรือ 0 ถ้ายังไม่เคยตั้ง */
-uint32_t softEpochNow()
-{
-  if (softEpoch == 0)
-    return 0;
-  return softEpoch + (millis() - softEpochSetMs) / 1000UL;
-}
 
 // จำข้อความที่แสดงอยู่จริงของแต่ละบรรทัด เพื่อเขียนเฉพาะบรรทัดที่เปลี่ยน
 // การเขียนทับทุกบรรทัดทุกรอบทำให้จอกะพริบและกินเวลาบัส I2C โดยเปล่าประโยชน์
@@ -113,7 +98,7 @@ bool i2cScanAndReport()
       foundMedicineLcd = true;
       Serial.print("  <- จอยา");
     }
-    else if (address == 0x68)
+    else if (address == DS1307_ADDRESS)
     {
       foundRtc = true;
       Serial.print("  <- DS1307");
@@ -250,29 +235,30 @@ void rtcLcdUpdate()
 
   lastRefreshMs = millis();
 
-  const bool chipRead = rtcPresent && RTC.read(currentTime);
-
-  if (!chipRead)
-  {
-    // ไม่มีชิปนาฬิกา แต่ถ้า server เคยบอกเวลามาแล้วก็เดินต่อด้วยนาฬิกาสำรองได้
-    // สำคัญมาก: ถ้า return ทิ้งตรงนี้ clockValid จะเป็น false ตลอดกาล
-    // แล้วทั้งเครื่องจะค้างที่หน้า "Clock not set" ใช้จ่ายยาไม่ได้เลย
-    const uint32_t epoch = softEpochNow();
-    if (epoch == 0)
-    {
-      clockValid = false;
-      writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], "RTC ERROR");
-      writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], "Wait for sync");
-      return;
-    }
-
-    breakTime(static_cast<time_t>(epoch), currentTime);
+  const uint32_t fallback = softwareClock.localEpoch(millis());
+  tmElements_t rtcTime = {};
+  const bool rtcRead = rtcPresent && RTC.read(rtcTime);
+  const bool rtcFieldsValid = rtcRead && rtcTime.Year >= 54 && rtcTime.Year < 130 &&
+      rtcTime.Month >= 1 && rtcTime.Month <= 12 && rtcTime.Day >= 1 && rtcTime.Day <= 31 &&
+      rtcTime.Hour < 24 && rtcTime.Minute < 60 && rtcTime.Second < 60;
+  const uint32_t rtcEpoch = rtcFieldsValid ? static_cast<uint32_t>(makeTime(rtcTime)) : 0;
+  const uint32_t drift = rtcEpoch > fallback ? rtcEpoch - fallback : fallback - rtcEpoch;
+  // A stale RTC that failed to accept the server time must not override it.
+  if (rtcRead && SoftwareClock::validEpoch(rtcEpoch) && (!fallback || drift <= 5)) {
+    currentTime = rtcTime;
+    softwareClock.sync(rtcEpoch, millis());
     clockValid = true;
-  }
-  else
-  {
-    // DS1307 ที่ยังไม่เคยตั้งเวลาจะรายงานปี 1970 ซึ่งใช้ตัดสินมื้อยาไม่ได้
-    clockValid = tmYearToCalendar(currentTime.Year) >= 2024;
+    clockSource = "RTC";
+  } else if (SoftwareClock::validEpoch(fallback)) {
+    breakTime(fallback, currentTime);
+    clockValid = true;
+    clockSource = "SERVER";
+  } else {
+    clockValid = false;
+    clockSource = "WAITING";
+    writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], "WAIT FOR TIME");
+    writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], "CONNECT WI-FI");
+    return;
   }
 
   char line1[17];
@@ -289,7 +275,7 @@ void rtcLcdUpdate()
            currentTime.Hour,
            currentTime.Minute,
            currentTime.Second,
-           chipRead ? (clockValid ? "" : "  NOT SET") : "  NO BAT");
+           strcmp(clockSource, "RTC") == 0 ? "" : "  NO BAT");
 
   writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], clockValid ? line1 : "SET CLOCK FIRST");
   writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], line2);
@@ -297,49 +283,45 @@ void rtcLcdUpdate()
 
 void rtcSyncFromEpoch(uint32_t localEpoch)
 {
-  if (localEpoch == 0)
-    return;
-
-  // เก็บไว้ในนาฬิกาสำรองเสมอ ไม่ว่าจะมีชิปหรือไม่
-  // ถ้าชิปหลุดไปกลางทาง (สายหลวม ไฟตก) เครื่องจะยังเดินเวลาต่อได้ด้วยค่านี้
-  softEpoch = localEpoch;
-  softEpochSetMs = millis();
-
-  if (!rtcPresent)
-  {
-    clockValid = true;
-    breakTime(static_cast<time_t>(localEpoch), currentTime);
-    Serial.printf("[RTC] ไม่มี DS1307 ใช้นาฬิกาสำรองตาม server: %02d:%02d:%02d\n",
-                  currentTime.Hour,
-                  currentTime.Minute,
-                  currentTime.Second);
-    return;
+  if (!SoftwareClock::validEpoch(localEpoch)) return;
+  const uint32_t previous = rtcLocalEpoch();
+  const uint32_t drift = previous > localEpoch ? previous - localEpoch : localEpoch - previous;
+  const bool wasUsingRtc = strcmp(clockSource, "RTC") == 0;
+  softwareClock.sync(localEpoch, millis());
+  breakTime(localEpoch, currentTime);
+  clockValid = true;
+  clockSource = "SERVER";
+  if (rtcPresent) {
+    if ((wasUsingRtc && drift <= 2) || RTC.write(currentTime)) {
+      clockSource = "RTC";
+    } else {
+      Serial.println("[Clock] RTC write failed; continuing with server time");
+    }
   }
-
-  // เขียน RTC เฉพาะตอนที่เพี้ยนจริง การเขียนทุกนาทีทำให้ EEPROM/บัสทำงานโดยไม่จำเป็น
-  const uint32_t current = rtcLocalEpoch();
-  const uint32_t drift = current > localEpoch ? current - localEpoch : localEpoch - current;
-  if (clockValid && drift <= 2)
-    return;
-
-  tmElements_t parts;
-  breakTime(static_cast<time_t>(localEpoch), parts);
-
-  if (RTC.write(parts))
-  {
-    currentTime = parts;
-    clockValid = true;
-    Serial.printf("[RTC] ตั้งเวลาตาม server: %02d:%02d:%02d (คลาดเคลื่อนเดิม %lu วินาที)\n",
-                  parts.Hour,
-                  parts.Minute,
-                  parts.Second,
-                  static_cast<unsigned long>(drift));
-  }
-  else
-  {
-    Serial.println("[RTC] เขียนเวลาลง DS1307 ไม่สำเร็จ");
-  }
+  if (!previous)
+    Serial.printf("[Clock] Time ready via %s\n", clockSource);
 }
+
+bool rtcIsPresent() { return rtcPresent; }
+
+bool rtcOscillatorHalted()
+{
+  // บิต 7 ของรีจิสเตอร์ 0x00 คือ CH (Clock Halt)
+  // ตั้งอยู่ = ออสซิลเลเตอร์ไม่เดิน ซึ่งเป็นสถานะตั้งต้นเมื่อไฟหมดโดยไม่มีถ่านสำรอง
+  //
+  // DS1307RTC.read() คืน false เมื่อบิตนี้ตั้งอยู่ ทำให้แยกไม่ออกระหว่าง
+  // "ชิปหาย" กับ "ชิปอยู่แต่นาฬิกาหยุด" ซึ่งสองอย่างนี้แก้คนละวิธีกันคนละเรื่อง
+  if (!rtcPresent) return false;
+
+  Wire.beginTransmission(DS1307_ADDRESS);
+  Wire.write(static_cast<uint8_t>(0x00));
+  if (Wire.endTransmission() != 0) return false;
+  if (Wire.requestFrom(static_cast<int>(DS1307_ADDRESS), 1) != 1) return false;
+
+  return (Wire.read() & 0x80) != 0;
+}
+
+const char *rtcClockSource() { return clockSource; }
 
 bool rtcIsValid()
 {
@@ -365,7 +347,7 @@ uint32_t rtcLocalEpoch()
 {
   if (!clockValid)
     return 0;
-  return static_cast<uint32_t>(makeTime(currentTime));
+  return softwareClock.localEpoch(millis());
 }
 
 void lcdSetMedicineScreen(const char *const *lines,

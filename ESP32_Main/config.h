@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include "hardware_profile.h"
 
 constexpr uint8_t I2C_SDA_PIN = 21;
 constexpr uint8_t I2C_SCL_PIN = 22;
@@ -16,6 +17,9 @@ constexpr uint8_t I2C_SCL_PIN = 22;
 // ส่วน COLS/ROWS ไม่ต้องแตะ เพราะมันบอกขนาดของจอที่ทำหน้าที่นั้น ไม่ได้ผูกกับ address
 
 // จอเล็ก 16x2 = นาฬิกา
+// ที่อยู่ของ DS1307 ตรึงมาจากโรงงาน ไม่มีขาเลือก เปลี่ยนไม่ได้
+constexpr uint8_t DS1307_ADDRESS = 0x68;
+
 constexpr uint8_t LCD_TIME_ADDRESS = 0x25;
 constexpr uint8_t LCD_TIME_COLS = 16;
 constexpr uint8_t LCD_TIME_ROWS = 2;
@@ -39,12 +43,16 @@ constexpr unsigned long LCD_HINT_INTERVAL_MS = 2200;
 // จำนวนข้อความที่สลับได้บนบรรทัดสุดท้าย
 constexpr uint8_t LCD_MAX_HINTS = 4;
 
+// โชว์หน้าวินิจฉัยตอนบูตนานเท่าไร (I2C, RTC, Wi-Fi ที่จำไว้, สาเหตุรีเซ็ต) ตั้ง 0 เพื่อปิด
+// มีไว้ไล่ปัญหาโดยไม่ต้องต่อ Serial เพราะการดู Serial ต้องถอด adapter แล้วจอจะดับ
+constexpr unsigned long BOOT_REPORT_SCREEN_MS = 4000;
+
 // Pin map for a classic ESP32 DevKit / ESP32-WROOM-32.
 constexpr uint8_t DISPENSER_COUNT = 3;
 constexpr uint8_t SERVO_PINS[DISPENSER_COUNT] = {18, 19, 23};
 
 // Keep motion disabled until calibrated without pills.
-constexpr bool ENABLE_SERVO_MOVEMENT = true;
+constexpr bool ENABLE_SERVO_MOVEMENT = PILLBOX_REAL_HARDWARE;
 
 /**
  * โหมดทดสอบระบบทั้งวงจรโดยที่ยังไม่ได้ต่อ Servo
@@ -57,12 +65,40 @@ constexpr bool ENABLE_SERVO_MOVEMENT = true;
  *
  * ต้องตั้งกลับเป็น false เมื่อต่อ Servo แล้ว
  */
-constexpr bool DISPENSE_DRY_RUN = false;
-constexpr int SERVO_MIN_PULSE_US = 1000;
-constexpr int SERVO_MAX_PULSE_US = 2000;
-constexpr int REST_PULSE_US[DISPENSER_COUNT] = {1500, 1500, 1500};
-constexpr int RELEASE_PULSE_US[DISPENSER_COUNT] = {1750, 1750, 1750};
-constexpr unsigned long MOVE_TIME_MS = 700;
+constexpr bool DISPENSE_DRY_RUN = !ENABLE_SERVO_MOVEMENT;
+// SG92R 270 องศาใช้พัลส์ 500-2500us เต็มพิสัย (ราว 7.4us ต่อองศา)
+// ช่วงเดิม 1000-2000 ได้แค่ราว 135 องศารวมสองข้าง ไปไม่ถึงช่องที่ 135 องศาเลย
+constexpr int SERVO_MIN_PULSE_US = 500;
+constexpr int SERVO_MAX_PULSE_US = 2500;
+constexpr int REST_PULSE_US[DISPENSER_COUNT] = PILLBOX_REST_PULSES;
+
+// ช่องปล่อยยาบนจาน 4 ช่อง เรียงจากเล็กไปใหญ่ ตรงกับตัวเลือก "รูปทรงและขนาดเม็ดยา" บนเว็บ
+//   0 = กลม ไม่เกิน 8 mm         หมุนขวา  90 องศา
+//   1 = กลม ไม่เกิน 13 mm        หมุนขวา 135 องศา
+//   2 = กลม ไม่เกิน 15 mm        หมุนซ้าย  90 องศา
+//   3 = รี/แคปซูล ไม่เกิน 25 mm  หมุนซ้าย 135 องศา
+// ค่าพัลส์จริงของแต่ละช่องมาจากการสอบเทียบ (examples/ServoCalibrate) ใส่ใน hardware.local.h
+constexpr uint8_t PILL_HOLE_COUNT = 4;
+constexpr int8_t PILL_HOLE_ANY = -1;  // ผู้ใช้ไม่ได้ระบุขนาดยา
+constexpr int HOLE_PULSE_US[DISPENSER_COUNT][PILL_HOLE_COUNT] = PILLBOX_HOLE_PULSES;
+constexpr unsigned long MOVE_TIME_MS = PILLBOX_MOVE_TIME_MS;
+static_assert(MOVE_TIME_MS > 0 && MOVE_TIME_MS <= 5000, "Invalid servo travel time");
+
+// เขียนแบบเรียกตัวเองเพราะเทสต์บางชุดคอมไพล์ด้วย C++11 ซึ่งห้ามใช้ลูปใน constexpr
+constexpr bool pulseWithinLimits(int us) { return us >= SERVO_MIN_PULSE_US && us <= SERVO_MAX_PULSE_US; }
+constexpr bool restPulsesValid(unsigned d)
+{
+  return d >= DISPENSER_COUNT || (pulseWithinLimits(REST_PULSE_US[d]) && restPulsesValid(d + 1));
+}
+constexpr bool holePulsesValid(unsigned d, unsigned h)
+{
+  return d >= DISPENSER_COUNT ? true
+       : h >= PILL_HOLE_COUNT ? holePulsesValid(d + 1, 0)
+       : pulseWithinLimits(HOLE_PULSE_US[d][h]) && HOLE_PULSE_US[d][h] != REST_PULSE_US[d] &&
+         holePulsesValid(d, h + 1);
+}
+static_assert(restPulsesValid(0) && holePulsesValid(0, 0),
+              "Servo calibration exceeds pulse limits, or a hole sits at the rest position");
 
 // ---------------------------------------------------------------------------
 // มอเตอร์สั่น (DRV8833)
@@ -99,7 +135,11 @@ constexpr unsigned long SHAKE_TIME_MS = 600;
 //
 // ตั้ง false ถ้ายังไม่ได้ต่อเซ็นเซอร์ ระบบจะกลับไปหมุนตามจำนวนเม็ดที่สั่งแบบไม่ตรวจสอบ
 // และติดป้าย "unverified" ไว้ในบันทึก เพื่อไม่ให้ประวัติหลอกว่ายืนยันเม็ดจริง
-constexpr bool ENABLE_PILL_SENSOR = false;
+constexpr bool ENABLE_PILL_SENSOR = PILLBOX_PILL_SENSOR;
+// จ่ายยาจริงต้องมีเซ็นเซอร์ยืนยัน เว้นแต่จะประกาศสละการยืนยันไว้ใน hardware.local.h
+// อย่างจงใจ ซึ่งกรณีนั้นบันทึกทุกรายการจะถูกติดป้าย unverified
+static_assert(!ENABLE_SERVO_MOVEMENT || ENABLE_PILL_SENSOR || PILLBOX_ALLOW_UNVERIFIED_DISPENSE,
+              "Real dispensing requires pill sensors, or PILLBOX_ALLOW_UNVERIFIED_DISPENSE");
 
 // GPIO34-39 เป็นขาอินพุตอย่างเดียวและ **ไม่มี pull-up ในตัวชิป**
 // โมดูล IR ต้องขับสัญญาณเองแบบ push-pull ไม่อย่างนั้นต้องใส่ pull-up ภายนอก 10k
@@ -113,9 +153,12 @@ constexpr bool PILL_SENSOR_ACTIVE_LOW = true;
 // ถ้าตั้งยาวเกินไปจะนับตกเมื่อเม็ดตกติดกันเร็วๆ
 constexpr unsigned long PILL_DETECT_LOCKOUT_MS = 60;
 
-// วนหมุน-เขย่าได้สูงสุดกี่รอบต่อการจ่ายหนึ่งครั้งก่อนยอมแพ้
-// ถ้าครบแล้วยังได้ไม่ครบ จะบันทึกเป็นจ่ายไม่ครบและให้ผู้ใช้กดลองใหม่
-constexpr uint8_t MAX_ATTEMPTS_PER_DOSE = 8;
+// ลองหมุน-เขย่าได้กี่รอบติดกันที่ช่องเดียวโดยไม่มีเม็ดตก ก่อนย้ายไปช่องถัดไป
+// ครบทุกช่องแล้วยังไม่ได้ = บันทึกว่าจ่ายไม่ครบ ให้ผู้ใช้กดลองใหม่
+//
+// ต้องมีเซ็นเซอร์ IR เท่านั้น ถ้าไม่มี เครื่องไม่รู้ว่ายาตกหรือยัง จึงหมุนแค่หนึ่งรอบต่อเม็ด
+// ที่ช่องแรก (วนหาช่องโดยไม่มีเซ็นเซอร์อาจเทยาออกมาหลายสิบเม็ด)
+constexpr uint8_t ATTEMPTS_PER_HOLE = 10;
 
 // ---------------------------------------------------------------------------
 // การจ่ายยาหลายช่องพร้อมกัน
@@ -238,11 +281,19 @@ constexpr uint8_t SETUP_AP_PASSWORD_BYTES = 4;
 static_assert(SETUP_AP_PASSWORD_BYTES * 2 >= 8 && SETUP_AP_PASSWORD_BYTES * 2 <= 63,
               "รหัสผ่าน AP แบบคำนวณเองต้องยาว 8-63 ตัวอักษรตามข้อกำหนดของ WPA2");
 
+// โหมดตั้งค่าปิดการเตือนและการจ่ายยาทั้งหมด จึงต้องไม่ค้างอยู่นานโดยไม่จำเป็น
+//
+// หลังต่อ Wi-Fi สำเร็จแต่จับคู่บัญชีไม่ผ่าน รอให้ผู้ใช้อ่านผลบนมือถือก่อนแล้วปิดเอง
+constexpr unsigned long SETUP_RESULT_GRACE_MS = 20000;
+// ไม่มีมือถือเปิดหน้าตั้งค่าอยู่เลยนานเท่านี้ และมี Wi-Fi ที่บันทึกไว้แล้ว = กลับไปทำงานปกติ
+// กันกรณีเผลอกดปุ่มเขียวค้างแล้วกล่องเงียบไปทั้งวัน
+constexpr unsigned long SETUP_IDLE_TIMEOUT_MS = 5UL * 60UL * 1000UL;
+
 // ---------------------------------------------------------------------------
 // การเชื่อมต่อกับ server (ตั้งค่า SERVER_BASE_URL และ DEVICE_API_KEY ใน secrets.h)
 // ---------------------------------------------------------------------------
 
-constexpr char FIRMWARE_VERSION[] = "1.1.0";
+constexpr char FIRMWARE_VERSION[] = "1.3.0";
 
 // รอบการดึงตารางยาเมื่อไม่มีคำสั่งค้าง (server อาจสั่งให้ถี่ขึ้นผ่าน next_poll_sec)
 constexpr unsigned long SYNC_INTERVAL_MS = 60UL * 1000UL;

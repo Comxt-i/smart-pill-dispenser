@@ -12,7 +12,11 @@ namespace {
  *   Returning : หมุนกลับตำแหน่งพัก โดยเบรกมอเตอร์ -> ล็อกแกนไม่ให้ยาตกเกิน
  *   Shaking   : อยู่นิ่งแล้วสั่นค้าง               -> สะบัดเม็ดที่ค้างอยู่ปากรูให้หลุดลง
  *
- * แล้ววนใหม่จนเซ็นเซอร์ IR นับเม็ดได้ครบ หรือจนครบ MAX_ATTEMPTS_PER_DOSE
+ * แล้ววนใหม่จนเซ็นเซอร์ IR นับเม็ดได้ครบ
+ *
+ * ช่องปล่อยยา: เริ่มที่ช่องตามขนาดยาที่ผู้ใช้กรอกบนเว็บ ถ้าหมุนครบ ATTEMPTS_PER_HOLE รอบ
+ * ติดกันโดยไม่มีเม็ดตก จะย้ายไปช่องที่ใหญ่กว่าทีละช่อง ครบแล้วยังไม่ได้ = จบ
+ * แบบจ่ายไม่ครบ ไม่ได้กรอกขนาด = ไล่จากช่องเล็กสุด
  *
  * จังหวะ Shaking จำเป็น เพราะบางครั้งเม็ดยาหลุดจากจานแล้วแต่ยังค้างอยู่ด้านล่าง
  * การหมุนอย่างเดียวไม่ทำให้มันตกลงไป
@@ -31,6 +35,16 @@ struct Run {
   unsigned long startDelayMs = 0;
   bool targetReached = false;
 
+  // ช่องปล่อยยาที่จะลองตามลำดับ และตำแหน่งปัจจุบันในลำดับนั้น
+  uint8_t holeOrder[PILL_HOLE_COUNT] = {};
+  uint8_t holeCount = 0;
+  uint8_t holePos = 0;
+  // หมุนที่ช่องปัจจุบันมาแล้วกี่รอบติดกันโดยไม่มีเม็ดตก
+  uint8_t holeMisses = 0;
+  // จำนวนเม็ดตอนเริ่มรอบหมุนนี้ ใช้ตัดสินว่ารอบนี้มีเม็ดตกไหม
+  uint8_t pillsAtAttemptStart = 0;
+
+
   // จังหวะกระตุกมอเตอร์สั่นตอนออกตัว (ไม่ใช้ delay)
   bool kicking = false;
   unsigned long kickStartedMs = 0;
@@ -39,6 +53,12 @@ struct Run {
   bool sensorWasBlocked = false;
   unsigned long lastDetectMs = 0;
 };
+
+// ทุกช่องไม่มีเม็ดตกเลย + รอบที่ได้เม็ด: เพดานรวมที่ตรรกะข้างล่างไม่มีทางเกิน
+constexpr unsigned MAX_TOTAL_ATTEMPTS = PILL_HOLE_COUNT * ATTEMPTS_PER_HOLE + MAX_PILLS_PER_DOSE;
+static_assert(MAX_TOTAL_ATTEMPTS <= 255, "attempt counter is uint8_t");
+
+uint8_t currentHole(const Run &run) { return run.holeOrder[run.holePos]; }
 
 Servo dispenserServos[DISPENSER_COUNT];
 Run runs[DISPENSER_COUNT];
@@ -204,7 +224,8 @@ void beginPhase(uint8_t index, Phase next, unsigned long now)
     case Phase::Releasing:
       ++run.attempts;
       vibrateOn(index, now);
-      servo.writeMicroseconds(RELEASE_PULSE_US[index]);
+      run.pillsAtAttemptStart = run.countedPills;
+      servo.writeMicroseconds(HOLE_PULSE_US[index][currentHole(run)]);
       break;
 
     case Phase::Returning:
@@ -233,6 +254,14 @@ void updateRun(uint8_t index, unsigned long now)
   if (run.phase == Phase::Idle)
     return;
 
+  // No pill may be counted before this channel actually starts.
+  if (run.phase == Phase::WaitingStart) {
+    if (now - run.phaseStartedMs >= run.startDelayMs) {
+      if (ENABLE_PILL_SENSOR && readSensor(index)) finishRun(index, false);
+      else beginPhase(index, Phase::Releasing, now);
+    }
+    return;
+  }
   tickKick(index, now);
   pollSensor(index, now);
 
@@ -246,7 +275,7 @@ void updateRun(uint8_t index, unsigned long now)
       return;
 
     case Phase::Releasing:
-      if (elapsed < MOVE_TIME_MS)
+      if (!run.targetReached && elapsed < MOVE_TIME_MS)
         return;
       // ถึงปลายทางแล้ว ต้องพาจานกลับตำแหน่งพักเสมอ แม้จะได้เม็ดครบแล้วก็ตาม
       beginPhase(index, Phase::Returning, now);
@@ -258,7 +287,7 @@ void updateRun(uint8_t index, unsigned long now)
 
       // ไม่มีเซ็นเซอร์: นับหนึ่งเม็ดต่อหนึ่งรอบหมุน เพราะไม่มีอะไรยืนยันได้ดีกว่านี้
       //
-      // ถ้าไม่นับตรงนี้ targetReached จะไม่มีวันเป็นจริง จานจะวนครบ MAX_ATTEMPTS_PER_DOSE
+      // ถ้าไม่นับตรงนี้ targetReached จะไม่มีวันเป็นจริง จานจะวนไปทุกช่อง
       // ทุกครั้งที่จ่าย (ราว 16 วินาทีต่อหนึ่งเม็ด) แล้วค่อยจบแบบรายงานว่าสำเร็จ
       if (!ENABLE_PILL_SENSOR)
       {
@@ -273,21 +302,11 @@ void updateRun(uint8_t index, unsigned long now)
         finishRun(index, false);
         return;
       }
-      if (run.attempts >= MAX_ATTEMPTS_PER_DOSE)
-      {
-        Serial.printf("[จ่ายยา] จาน %u หมุนครบ %u รอบแล้วยังได้ไม่ครบ (%u/%u เม็ด)\n",
-                      static_cast<unsigned>(index + 1),
-                      static_cast<unsigned>(run.attempts),
-                      static_cast<unsigned>(run.countedPills),
-                      static_cast<unsigned>(run.requestedPills));
-        finishRun(index, false);
-        return;
-      }
-
       beginPhase(index, Phase::Shaking, now);
       return;
 
     case Phase::Shaking:
+    {
       if (elapsed < SHAKE_TIME_MS)
         return;
 
@@ -297,8 +316,48 @@ void updateRun(uint8_t index, unsigned long now)
         finishRun(index, false);
         return;
       }
+
+      // ไม่มีเซ็นเซอร์: รู้ไม่ได้ว่ายาตกหรือยัง จึงห้ามย้ายช่องหรือวนซ้ำเกินจำนวนเม็ด
+      // (นับหนึ่งเม็ดต่อรอบไปแล้วตอน Returning จึงจบเองเมื่อครบ)
+      if (ENABLE_PILL_SENSOR)
+      {
+        // ตัดสินผลของรอบนี้หลังเขย่าเสร็จ เพราะเม็ดมักหลุดตอนเขย่า ไม่ใช่ตอนหมุน
+        const bool dropped = run.countedPills > run.pillsAtAttemptStart;
+        if (dropped)
+        {
+          run.holeMisses = 0;  // ช่องนี้ใช้ได้ อยู่ช่องเดิมต่อสำหรับเม็ดถัดไป
+        }
+        else if (++run.holeMisses >= ATTEMPTS_PER_HOLE)
+        {
+          Serial.printf("[จ่ายยา] จาน %u ช่อง %u ลอง %u รอบแล้วไม่มีเม็ดตก\n",
+                        static_cast<unsigned>(index + 1),
+                        static_cast<unsigned>(currentHole(run)),
+                        static_cast<unsigned>(ATTEMPTS_PER_HOLE));
+          run.holeMisses = 0;
+          if (++run.holePos >= run.holeCount)
+          {
+            Serial.printf("[จ่ายยา] จาน %u ลองครบทุกช่องแล้ว ได้ %u/%u เม็ด\n",
+                          static_cast<unsigned>(index + 1),
+                          static_cast<unsigned>(run.countedPills),
+                          static_cast<unsigned>(run.requestedPills));
+            finishRun(index, false);
+            return;
+          }
+          Serial.printf("[จ่ายยา] จาน %u ย้ายไปช่อง %u\n",
+                        static_cast<unsigned>(index + 1),
+                        static_cast<unsigned>(currentHole(run)));
+        }
+      }
+
+      // กันหลุดซ้อนอีกชั้น ตามตรรกะข้างบนไม่ควรมาถึงได้
+      if (run.attempts >= MAX_TOTAL_ATTEMPTS)
+      {
+        finishRun(index, false);
+        return;
+      }
       beginPhase(index, Phase::Releasing, now);
       return;
+    }
 
     case Phase::Idle:
       return;
@@ -343,7 +402,7 @@ void dispenserControlBegin()
   outcomeCount = 0;
 }
 
-DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills)
+DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills, int8_t preferredHole)
 {
   if (dispenser < 1 || dispenser > DISPENSER_COUNT || pills < 1 || pills > MAX_PILLS_PER_DOSE)
     return DispenseResult::Invalid;
@@ -361,6 +420,9 @@ DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills)
   if (running >= MAX_CONCURRENT_DISPENSERS)
     return DispenseResult::Busy;
 
+  if (ENABLE_PILL_SENSOR && readSensor(index))
+    return DispenseResult::SensorBlocked;
+
   Servo &servo = dispenserServos[index];
   servo.attach(SERVO_PINS[index], SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
   if (!servo.attached())
@@ -371,6 +433,23 @@ DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills)
   run.countedPills = 0;
   run.attempts = 0;
   run.targetReached = false;
+
+  // ลำดับช่องที่จะลอง: ช่องตามขนาดที่ผู้ใช้กรอกก่อน แล้วเฉพาะช่องที่ใหญ่กว่าไล่ขึ้นไป
+  // ไม่ย้อนไปช่องที่เล็กกว่า เพราะเม็ดที่ไม่ผ่านช่องขนาดตัวเองย่อมไม่ผ่านช่องที่เล็กกว่าแน่นอน
+  // ไม่ได้กรอกขนาด (หรือค่าผิดช่วง) = ไล่จากช่องเล็กสุดไปใหญ่สุด
+  const bool hasPreferred = preferredHole >= 0 && preferredHole < static_cast<int8_t>(PILL_HOLE_COUNT);
+  run.holeCount = 0;
+  const uint8_t firstHole = hasPreferred ? static_cast<uint8_t>(preferredHole) : 0;
+  for (uint8_t hole = firstHole; hole < PILL_HOLE_COUNT; ++hole)
+    run.holeOrder[run.holeCount++] = hole;
+  run.holePos = 0;
+  run.holeMisses = 0;
+
+  Serial.printf("[จ่ายยา] จาน %u ขอ %u เม็ด เริ่มที่ช่อง %u%s\n",
+                static_cast<unsigned>(dispenser),
+                static_cast<unsigned>(pills),
+                static_cast<unsigned>(currentHole(run)),
+                hasPreferred ? " (ตามขนาดยาที่กรอก)" : " (ไม่ได้กรอกขนาด เริ่มช่องเล็กสุด)");
 
   const unsigned long now = millis();
 

@@ -39,9 +39,50 @@ int main() {
   wifiWebLoop(); assert(connecting && WiFi.beginCount==1);
   fakeTime+=30001; wifiWebLoop(); assert(!connecting && wifiSetupActive() && saved.magic==0);
 
+  // จับคู่บัญชีไม่ผ่าน แต่ Wi-Fi ต่อติดแล้ว: ต้องจำรหัสไว้
+  // ไม่อย่างนั้นรีเซ็ตแล้วลืมทุกครั้งที่รหัสตั้งค่าหมดอายุหรือเซิร์ฟเวอร์ล่ม
   submit("Home", "password", "0123456789ABCDEF0123"); wifiWebLoop();
   claimCode=403; WiFi.connectionStatus=WL_CONNECTED; wifiWebLoop();
-  assert(!connecting && !completed && saved.magic==0 && wifiSetupActive());
+  assert(!connecting && !completed && wifiSetupActive());
+  assert(saved.magic==WIFI_MAGIC && strcmp(saved.ssid,"Home")==0);
+
+  // ตั้ง Wi-Fi ใหม่ทับค่าเดิม แม้จับคู่ไม่ผ่านก็ต้องจำค่าใหม่
+  // หน้าตั้งค่าเปิดได้เฉพาะคนที่อยู่หน้าเครื่อง (กดปุ่มค้าง) การกันเขียนทับจึงไม่ได้กันใคร
+  // แต่ทำให้ "ตั้ง Wi-Fi เสร็จแล้วไม่จำ"
+  submit("NewHome", "password", "0123456789ABCDEF0123"); wifiWebLoop();
+  claimCode=404; WiFi.connectionStatus=WL_CONNECTED; wifiWebLoop();
+  assert(saved.magic==WIFI_MAGIC && strcmp(saved.ssid,"NewHome")==0);
+
+  // จับคู่ไม่ผ่านต้องไม่ขังกล่องไว้ในโหมดตั้งค่า เพราะโหมดนี้ปิดการเตือนและการจ่ายยาทั้งหมด
+  // เปิดค้างไว้ให้อ่านผลบนมือถือก่อน แล้วปิดเองและกลับไป sync ต่อ
+  const int syncBeforeFailure = requestedSync;
+  fakeTime += SETUP_RESULT_GRACE_MS - 1; wifiWebLoop(); assert(wifiSetupActive());
+  fakeTime += 2; wifiWebLoop();
+  assert(!wifiSetupActive() && requestedSync == syncBeforeFailure + 1);
+
+  // ผู้ใช้กดลองใหม่ระหว่างรอปิด: ห้ามปิดหน้าทับขณะกำลังเชื่อมต่อ
+  assert(wifiStartSetup());
+  submit("NewHome", "password", "0123456789ABCDEF0123"); wifiWebLoop();
+  claimCode=409; WiFi.connectionStatus=WL_CONNECTED; wifiWebLoop();
+  submit("NewHome", "password", "0123456789ABCDEF0123");
+  fakeTime += SETUP_RESULT_GRACE_MS + 1; wifiWebLoop();
+  assert(wifiSetupActive() && connecting);
+  fakeTime += 30001; wifiWebLoop();  // รอบนี้ต่อไม่ติด
+  assert(!connecting && wifiSetupActive());
+
+  // ไม่มีมือถือเปิดหน้าตั้งค่าอยู่ (เช่นเผลอกดปุ่มค้าง) และมี Wi-Fi บันทึกไว้แล้ว
+  // ต้องกลับไปทำงานปกติเอง ไม่ใช่เงียบทั้งวัน
+  handleSetupStatus();  // มือถือโพลสถานะครั้งสุดท้าย
+  fakeTime += SETUP_IDLE_TIMEOUT_MS - 1; wifiWebLoop(); assert(wifiSetupActive());
+  fakeTime += 2; wifiWebLoop(); assert(!wifiSetupActive());
+  assert(saved.magic==WIFI_MAGIC && strcmp(saved.ssid,"NewHome")==0);
+
+  // เครื่องใหม่ที่ยังไม่มี Wi-Fi ห้ามหมดเวลา เพราะไม่มีอะไรให้กลับไปทำ
+  saved={};
+  assert(wifiStartSetup());
+  handleSetupStatus();
+  fakeTime += SETUP_IDLE_TIMEOUT_MS * 2; wifiWebLoop();
+  assert(wifiSetupActive());
 
   submit("Home", "password", "0123456789ABCDEF0123"); wifiWebLoop();
   claimCode=200; storage.writeOk=false; WiFi.connectionStatus=WL_CONNECTED; wifiWebLoop();
@@ -51,7 +92,8 @@ int main() {
   storage.writeOk=true; WiFi.connectionStatus=WL_CONNECTED; wifiWebLoop();
   assert(completed && saved.magic==WIFI_MAGIC && wifiSetupActive());
   assert(strcmp(saved.ssid,"Home")==0 && setupToken[0]=='\0');
-  fakeTime+=10001; wifiWebLoop(); assert(!wifiSetupActive() && requestedSync==1);
+  const int syncBeforeDone = requestedSync;
+  fakeTime+=10001; wifiWebLoop(); assert(!wifiSetupActive() && requestedSync == syncBeforeDone + 1);
   saved={}; wifiWebBegin(); assert(saved.magic==WIFI_MAGIC && !wifiSetupActive());
   // Boot gesture is captured before peripheral initialization and stays latched.
   releaseAt = fakeTime + 4000;

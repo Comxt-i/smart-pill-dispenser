@@ -75,11 +75,31 @@ int scheduleStageSlot(uint8_t number,
   slot.number = number;
   slot.active = active;
   slot.amountPerDose = amountPerDose > 0 ? amountPerDose : 1.0f;
+  // ต้องรีเซ็ตทุกครั้ง: staging ถูกใช้ซ้ำ ถ้าไม่ล้าง ขนาดยาของยาตัวก่อนจะติดมากับยาตัวใหม่
+  slot.pillHole = PILL_HOLE_ANY;
   slot.doseCount = 0;
   copyText(slot.medicationId, sizeof(slot.medicationId), medicationId);
   copyText(slot.name, sizeof(slot.name), name);
 
   return stagingCount++;
+}
+
+void scheduleStageSlotPillHole(int slotIndex, int8_t hole)
+{
+  if (slotIndex < 0 || slotIndex >= stagingCount)
+    return;
+  staging[slotIndex].pillHole =
+      hole >= 0 && hole < static_cast<int8_t>(PILL_HOLE_COUNT) ? hole : PILL_HOLE_ANY;
+}
+
+int8_t scheduleSlotPillHole(uint8_t number)
+{
+  for (uint8_t i = 0; i < slotCount; ++i)
+  {
+    if (slots[i].number == number)
+      return slots[i].pillHole;
+  }
+  return PILL_HOLE_ANY;
 }
 
 void scheduleStageDose(int slotIndex,
@@ -412,7 +432,7 @@ uint8_t scheduleSnoozeCount(const DoseRef &ref)
 bool doseIsOpen(const Dose &dose)
 {
   return dose.state == DoseState::Pending || dose.state == DoseState::Alerting ||
-         dose.state == DoseState::Snoozed || dose.state == DoseState::Dispensing;
+         dose.state == DoseState::Snoozed || dose.state == DoseState::Dispensing || dose.state == DoseState::Queued;
 }
 
 int doseEffectiveMinutes(const Dose &dose)
@@ -428,11 +448,13 @@ const char *doseStateName(DoseState state)
   {
     case DoseState::Pending: return "Pending";
     case DoseState::Alerting: return "Alerting";
+    case DoseState::Queued: return "Queued";
     case DoseState::Dispensing: return "Dispensing";
     case DoseState::Done: return "Done";
     case DoseState::Missed: return "Missed";
     case DoseState::Skipped: return "Skipped";
     case DoseState::Snoozed: return "Snoozed";
+    case DoseState::Failed: return "Failed";
   }
   return "Unknown";
 }

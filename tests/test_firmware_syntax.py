@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCES = [
     ("ESP32_Main", "alert.cpp"),
     ("ESP32_Main", "buttons.cpp"),
+    ("ESP32_Main", "command_journal.cpp"),
     ("ESP32_Main", "dispenser_control.cpp"),
     ("ESP32_Main", "event_queue.cpp"),
     ("ESP32_Main", "marquee.cpp"),
@@ -27,6 +28,7 @@ SOURCES = [
     ("examples/TestDispenseEvent", "TestDispenseEvent.ino"),
     # sketch นี้แยกสาขาตามบอร์ด ต้องบอกให้ชัดว่าตรวจสาขาของ ESP32
     ("examples/TwoPlateDispense", "TwoPlateDispense.ino", ["-DESP32"]),
+    ("examples/ServoCalibrate", "ServoCalibrate.ino"),
 ]
 
 

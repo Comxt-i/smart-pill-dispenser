@@ -15,7 +15,7 @@ class ScheduleStoreTest(unittest.TestCase):
         self.assertIsNotNone(compiler, "Install a C++ compiler to run these tests")
         with tempfile.TemporaryDirectory() as directory:
             build = Path(directory)
-            for name in ("config.h", "schedule_store.h", "schedule_store.cpp"):
+            for name in ("config.h", "hardware_profile.h", "schedule_store.h", "schedule_store.cpp"):
                 shutil.copy(ROOT / "ESP32_Main" / name, build / name)
             executable = build / "schedule_test"
             subprocess.run([

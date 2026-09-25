@@ -21,6 +21,8 @@ void setup()
   Serial.println();
   Serial.printf("Smart Pill Dispenser firmware %s\n", FIRMWARE_VERSION);
 
+  Serial.println(ENABLE_SERVO_MOVEMENT ? "Mode: HARDWARE (motion enabled)" : "Mode: SIMULATION (no motion)");
+
   wifiCheckSetupButtonAtBoot();
 
   // ESP32Servo กับ analogWrite ใช้ LEDC ร่วมกัน ถ้าไม่จองไว้ก่อนจะแย่ง timer กันเอง

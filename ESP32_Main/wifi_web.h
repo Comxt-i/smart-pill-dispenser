@@ -29,3 +29,10 @@ bool wifiStartSetup();
  */
 const char *wifiSetupSsid();
 const char *wifiSetupPassword();
+
+/** สถานะโหมดตั้งค่าแบบสั้นภาษาอังกฤษ ไม่เกิน 14 ตัวอักษร สำหรับจอ LCD ที่แสดงไทยไม่ได้ */
+const char *wifiSetupStatusShort();
+
+/** มี Wi-Fi บันทึกไว้ใน NVS หรือไม่ ใช้ตอบคำถาม "มันจำไหม" ได้จากหน้าจอ */
+bool wifiHasSavedNetwork();
+const char *wifiSavedSsid();

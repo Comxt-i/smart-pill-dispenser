@@ -8,10 +8,12 @@
 enum class DoseState : uint8_t {
   Pending,     // ยังไม่ถึงเวลา
   Alerting,    // ถึงเวลาแล้ว กำลังเตือนให้ผู้ใช้กดปุ่ม
+  Queued,      // รับทั้งรอบแล้ว กำลังรอช่องว่าง
   Dispensing,  // ผู้ใช้กดปุ่มแล้ว จานกำลังหมุน
   Done,        // จ่ายสำเร็จ (หรือ server บอกว่ามื้อนี้จบไปแล้ว)
   Missed,      // เลยเวลาผ่อนผันโดยไม่มีใครกดปุ่ม
   Skipped,     // ผู้ใช้กด Cancel เพื่อข้ามมื้อนี้
+  Failed,      // ต้องตรวจกลไก/จำนวนยาเองก่อนออกคำสั่งใหม่
   Snoozed,     // ผู้ใช้กดเลื่อน หยุดเตือนชั่วคราวจนถึงเวลาที่เลื่อนไป
 };
 
@@ -31,6 +33,8 @@ struct Slot {
   char medicationId[40];
   char name[34];  // ชื่อสำหรับ LCD (server ตัดมาให้ไม่เกิน 32 ตัวอักษร ยาวเกินจอจะเลื่อนวน)
   float amountPerDose;
+  // ช่องปล่อยยาตามขนาดที่ผู้ใช้กรอกบนเว็บ (0-3) หรือ PILL_HOLE_ANY ถ้าไม่ได้กรอก
+  int8_t pillHole;
   Dose doses[MAX_DOSES_PER_SLOT];
   uint8_t doseCount;
 };
@@ -70,6 +74,12 @@ int scheduleFindSlot(uint8_t slotNumber);
 DoseRef scheduleFindByScheduleId(const char *scheduleId);
 Dose *scheduleDoseAt(const DoseRef &ref);
 const Slot *scheduleSlotOf(const DoseRef &ref);
+
+/** ตั้งช่องปล่อยยาของช่องยาที่เพิ่ง stage ค่านอกช่วง 0-3 ถือว่าไม่ได้ระบุ */
+void scheduleStageSlotPillHole(int slotIndex, int8_t hole);
+
+/** ช่องปล่อยยาของช่องยาหมายเลข `number` (1..DISPENSER_COUNT) หรือ PILL_HOLE_ANY */
+int8_t scheduleSlotPillHole(uint8_t number);
 
 /**
  * เดินสถานะของทุกมื้อยาตามเวลาปัจจุบัน และคืนมื้อที่ต้องเตือนอยู่ตอนนี้

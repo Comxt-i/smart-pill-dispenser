@@ -277,6 +277,30 @@ void testLimitsAreRespected()
   assert(scheduleStageSlot(1, true, "m", "n", 1.0f) == -1);
   scheduleCommitSync();
   assert(scheduleSlotCount() == DISPENSER_COUNT);
+
+  // ขนาดเม็ดยา -> ช่องปล่อยยา
+  scheduleBeginSync();
+  const int big = scheduleStageSlot(2, true, "capsule-med", "Big", 1.0f);
+  scheduleStageSlotPillHole(big, 3);
+  const int small = scheduleStageSlot(3, true, "tiny-med", "Small", 1.0f);
+  scheduleStageSlotPillHole(small, 0);
+  scheduleCommitSync();
+  assert(scheduleSlotPillHole(2) == 3 && scheduleSlotPillHole(3) == 0);
+  assert(scheduleSlotPillHole(1) == PILL_HOLE_ANY);  // ไม่มีช่องนี้ในตาราง
+
+  // sync รอบถัดไป เปลี่ยนยาในช่อง 2 เป็นตัวที่ไม่ได้กรอกขนาด
+  // staging ถูกใช้ซ้ำ ถ้าไม่ล้าง ขนาดแคปซูลของยาตัวเก่าจะติดมากับยาตัวใหม่
+  scheduleBeginSync();
+  scheduleStageSlot(2, true, "other-med", "NoSize", 1.0f);
+  scheduleCommitSync();
+  assert(scheduleSlotPillHole(2) == PILL_HOLE_ANY);
+
+  // ค่านอกช่วงจากเซิร์ฟเวอร์ถือว่าไม่ได้ระบุ
+  scheduleBeginSync();
+  scheduleStageSlotPillHole(scheduleStageSlot(1, true, "m", "n", 1.0f), 7);
+  scheduleStageSlotPillHole(99, 2);  // ดัชนี staging ผิด ต้องไม่พัง
+  scheduleCommitSync();
+  assert(scheduleSlotPillHole(1) == PILL_HOLE_ANY);
 }
 
 

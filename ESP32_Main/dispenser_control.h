@@ -1,8 +1,9 @@
 #pragma once
 
+#include "config.h"
 #include <Arduino.h>
 
-enum class DispenseResult { Started, Invalid, Disabled, Busy, Cancelled, ServoError };
+enum class DispenseResult { Started, Invalid, Disabled, Busy, Cancelled, ServoError, SensorBlocked };
 
 /**
  * ผลของการจ่ายยาหนึ่งครั้งที่ "จบแล้ว" ไม่ว่าจะจบครบหรือถูกยกเลิกกลางคัน
@@ -37,13 +38,19 @@ void dispenserControlUpdate();
 /**
  * สั่งจ่ายยา `pills` เม็ดจากจาน `dispenser`
  *
- * จะวนหมุน-เขย่าเป็นรอบๆ จนเซ็นเซอร์นับครบ หรือจนครบ MAX_ATTEMPTS_PER_DOSE
+ * จะวนหมุน-เขย่าเป็นรอบๆ จนเซ็นเซอร์นับครบ
+ *
+ * `preferredHole` คือช่องปล่อยยาตามขนาดที่ผู้ใช้กรอกบนเว็บ (0-3 จากเล็กไปใหญ่)
+ * ลองช่องนั้นก่อน ATTEMPTS_PER_HOLE รอบ ไม่ตกก็ไล่ไปช่องที่ใหญ่กว่า (ไม่ย้อนไปช่องที่เล็กกว่า)
+ * PILL_HOLE_ANY = ไม่ได้กรอก ไล่จากช่องเล็กสุด
+ * ไม่มีเซ็นเซอร์: หมุนหนึ่งรอบต่อเม็ดที่ช่องแรกเท่านั้น ไม่วนหาช่อง
  * ไม่ block — ต้องเรียก dispenserControlUpdate() ทุกลูป
  *
  * หลายจานทำงานพร้อมกันได้ถึง MAX_CONCURRENT_DISPENSERS จาน
  * เกินกว่านั้นจะคืน Busy ผู้เรียกต้องลองใหม่เมื่อ dispenserHasCapacity() เป็น true
  */
-DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills);
+DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills,
+                                int8_t preferredHole = PILL_HOLE_ANY);
 
 /** หยุดทุกจานที่กำลังทำงานอยู่ */
 void stopDispenser();
