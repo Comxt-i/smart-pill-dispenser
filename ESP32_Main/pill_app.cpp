@@ -1,4 +1,5 @@
 #include <esp_system.h>
+#include "schedule_cache.h"
 #include "pill_app.h"
 
 #include "alert.h"
@@ -55,6 +56,8 @@ void persistDeferredEvents() {
 bool clockWasValid = false;
 bool firstTickAfterClock = true;
 unsigned long lastEventFlushMs = 0;
+// ลองใช้ตารางยาในเครื่องแล้วหรือยังตั้งแต่เปิดเครื่อง (ลองครั้งเดียว ไม่อ่าน NVS ทุกรอบ loop)
+bool cachedScheduleTried = false;
 bool flushRequested = false;  // มีผลใหม่เข้าคิว ให้ส่งทันทีที่จบรอบ loop
 unsigned long cancelPressedAtMs = 0;
 bool cancelPressActive = false;
@@ -143,9 +146,56 @@ void reportCommand(const RemoteCommand &command, const char *status, const char 
 }
 
 /** schedule_store เรียกทุกครั้งที่มื้อยาเปลี่ยนสถานะ */
+/**
+ * สถานะที่ถือว่ามื้อนี้จบแล้ววันนี้ ห้ามเตือนซ้ำหลังเปิดเครื่องใหม่
+ * รวม Dispensing: ไฟดับกลางการจ่ายไม่รู้ว่ายาออกไปแล้วกี่เม็ด ไม่เตือนซ้ำคือทางที่ปลอดภัย
+ * ไม่รวม Queued: รับรอบแล้วแต่จานยังไม่หมุน ยังไม่มียาออกมา เตือนใหม่หลังเปิดเครื่องจึงถูกต้อง
+ */
+bool isClosedState(DoseState state)
+{
+  return state == DoseState::Dispensing || state == DoseState::Done || state == DoseState::Missed ||
+         state == DoseState::Skipped || state == DoseState::Failed;
+}
+
+/**
+ * บันทึกลง NVS ทุกมื้อที่จบแล้วแต่ยังไม่ได้บันทึก
+ *
+ * บางเส้นทางตั้งสถานะตรงๆ ไม่ผ่าน callback (โหมดทดสอบ จ่ายไม่สำเร็จ เลยเวลา) เพื่อไม่ให้ส่งผลซ้ำ
+ * สแกนรวมที่เดียวจึงไม่พลาดเส้นทางไหน รวมถึงเส้นทางที่จะเพิ่มในอนาคต
+ * ถูกมาก: ไม่กี่สิบมื้อ เขียน NVS เฉพาะมื้อที่เพิ่งจบ
+ *
+ * เรียกที่ไหนก็ได้ เพราะใช้ scheduleDayKey() ซึ่งเปลี่ยนพร้อมกับตอนล้างสถานะเมื่อขึ้นวันใหม่เสมอ
+ * (ห้ามเปลี่ยนเป็นวันที่ของนาฬิกา ช่วงข้ามเที่ยงคืนสองค่านี้ไม่ตรงกัน)
+ */
+void persistClosedDoses()
+{
+  const uint32_t day = scheduleDayKey();
+  if (day == 0)
+    return;
+  for (uint8_t s = 0; s < scheduleSlotCount(); ++s)
+  {
+    const Slot &slot = scheduleSlot(s);
+    for (uint8_t d = 0; d < slot.doseCount; ++d)
+    {
+      const Dose &dose = slot.doses[d];
+      if (isClosedState(dose.state) && !scheduleCacheIsClosed(dose.scheduleId, day))
+        scheduleCacheMarkClosed(dose.scheduleId, day);
+    }
+  }
+}
+
 void onDoseStateChanged(const DoseRef &ref, DoseState previous, DoseState next)
 {
   (void)previous;
+
+  // บันทึกลง NVS ทันทีว่ามื้อนี้จบแล้ววันนี้ ก่อนจะส่งผลขึ้น server สำเร็จ
+  // ไฟดับแล้วเปิดใหม่ตอนไม่มีเน็ต ตารางในเครื่องยังบอกว่ามื้อนี้ยังไม่กิน รายการนี้กันเตือนซ้ำ/จ่ายซ้ำ
+  // (เส้นทางที่ตั้งสถานะตรงๆ โดยไม่ผ่านตรงนี้ persistClosedDoses() เก็บให้)
+  if (isClosedState(next) && scheduleDayKey() != 0)
+  {
+    if (const Dose *dose = scheduleDoseAt(ref))
+      scheduleCacheMarkClosed(dose->scheduleId, scheduleDayKey());
+  }
 
   switch (next)
   {
@@ -1016,6 +1066,7 @@ void appBegin()
   statusLedBegin();
   eventQueueBegin();
   scheduleBegin(onDoseStateChanged);
+  scheduleCacheBegin();
 
   rtcLcdBegin();
 
@@ -1047,18 +1098,30 @@ void appLoop()
 
   if (!wifiSetupActive())
   {
-    if (scheduleConsumeDayRollover()) netSyncRequestNow();
+    if (scheduleConsumeDayRollover()) {
+      // วันใหม่: เลือกมื้อของวันนี้จากตารางทั้งสัปดาห์ในเครื่อง ไม่ใช่เอามื้อของเมื่อวานมาใช้ซ้ำ
+      // (ยาบางตัวกินเฉพาะบางวัน) แล้วค่อยถาม server เผื่อมีอะไรเปลี่ยน
+      netSyncApplyCachedSchedule();
+      netSyncRequestNow();
+    }
     const bool clockValid = rtcIsValid();
+    // เปิดเครื่องมาแล้วนาฬิกาพร้อม แต่ยังไม่มีตารางจาก server: ใช้ของที่เก็บไว้ เตือนได้แม้เน็ตยังไม่มา
+    if (clockValid && !scheduleHasData() && !cachedScheduleTried) {
+      cachedScheduleTried = true;
+      netSyncApplyCachedSchedule();
+    }
     if (clockValid && !clockWasValid) firstTickAfterClock = true;
     clockWasValid = clockValid;
     if (clockValid && scheduleHasData()) {
       activeAlert = scheduleTick(rtcMinutesOfDay(), rtcDayKey(), firstTickAfterClock);
       firstTickAfterClock = false;
+      persistClosedDoses();
     }
   }
 
   // Process physical gestures before any blocking network work or queued commands.
   handleButtons();
+  persistClosedDoses();  // มื้อที่เพิ่งรับหรือข้ามด้วยปุ่ม บันทึกทันที ไม่รอรอบถัดไป
   if (wifiSetupActive())
   {
     alertSet(AlertPattern::None);
@@ -1090,7 +1153,8 @@ void appLoop()
       lastEventFlushMs = millis();
       flushRequested = false;
     }
-    if (netSyncDue()) netSyncFetch();
+    // sync ถ้าถึงรอบ ไม่อย่างนั้นเปิดสายรอให้ server บอกทันทีเมื่อมีอะไรเปลี่ยน
+    netSyncPump();
   }
 
   // ช่องที่รอคิวอยู่เริ่มเองทันทีที่มีจานว่าง ผู้ใช้จึงกดปุ่มครั้งเดียวพอ

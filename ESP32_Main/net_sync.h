@@ -37,6 +37,18 @@ bool netSyncFlushEvents();
  */
 void netSyncService();
 
+/**
+ * ตัดสินว่าจะทำงานเครือข่ายอะไรต่อ (ไม่ block): sync ถ้าถึงรอบ ไม่อย่างนั้นเปิดสาย /wait
+ * ค้างไว้ให้ server บอกทันทีเมื่อมีอะไรเปลี่ยน เรียกทุกรอบ loop ได้
+ */
+void netSyncPump();
+
+/**
+ * ใช้ตารางยาที่เก็บไว้ในเครื่อง (เลือกมื้อของวันนี้ตามนาฬิกาเครื่อง)
+ * เรียกตอนเปิดเครื่องหลังนาฬิกาพร้อม และตอนขึ้นวันใหม่ คืน false ถ้ายังไม่มีตารางเก็บไว้
+ */
+bool netSyncApplyCachedSchedule();
+
 /** true เมื่อถึงรอบที่ควรเรียก netSyncFetch() (คุมจังหวะตาม next_poll_sec ของ server) */
 bool netSyncDue();
 

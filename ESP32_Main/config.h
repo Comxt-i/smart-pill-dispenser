@@ -299,6 +299,16 @@ constexpr char FIRMWARE_VERSION[] = "1.3.0";
 // ถามตารางจาก server อย่างน้อยทุกเท่านี้ แก้บนเว็บแล้วจอจะเปลี่ยนภายในไม่กี่วินาที
 // ทำได้เพราะการคุยกับ server อยู่ใน task เบื้องหลัง ไม่ทำให้ปุ่ม จอ หรือเสียงค้างอีกแล้ว
 constexpr unsigned long SYNC_INTERVAL_MS = 5UL * 1000UL;
+
+// ถือสาย /api/device/wait ไว้นานสุดกี่วินาที server ตอบทันทีเมื่อมีอะไรเปลี่ยน
+// ระหว่างถือสาย งานเครือข่ายอื่น (ส่งผลการจ่ายยา) ต้องรอ ค่านี้จึงเป็นเวลารอสูงสุดของงานนั้นด้วย
+// ต้องไม่เกิน 25 (เพดานของ server)
+constexpr unsigned long WAIT_TIMEOUT_SEC = 15;
+static_assert(WAIT_TIMEOUT_SEC >= 1 && WAIT_TIMEOUT_SEC <= 25, "server holds /wait for at most 25 s");
+// server แจ้งการเปลี่ยนเองได้แล้ว sync เต็มเป็นแค่ตาข่ายรองรับ ห่างได้ถึงเท่านี้
+constexpr unsigned long FULL_SYNC_MAX_MS = 10UL * 60UL * 1000UL;
+// server ตอบ 404 ที่ /wait (ยังไม่อัปเดต) กลับไปถามเป็นรอบ แล้วลองใหม่หลังจากนี้
+constexpr unsigned long WAIT_UNSUPPORTED_RETRY_MS = 10UL * 60UL * 1000UL;
 // เว้นระยะก่อน sync ใหม่หลังเรียกไม่สำเร็จ กันยิงรัวตอน server ล่ม
 constexpr unsigned long SYNC_RETRY_MS = 15UL * 1000UL;
 // รอบการพยายามส่งผลการจ่ายยาที่ค้างอยู่ในคิว

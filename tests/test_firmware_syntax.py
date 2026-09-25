@@ -25,6 +25,7 @@ SOURCES = [
     ("ESP32_Main", "pill_app.cpp"),
     ("ESP32_Main", "rtc_lcd.cpp"),
     ("ESP32_Main", "schedule_store.cpp"),
+    ("ESP32_Main", "schedule_cache.cpp"),
     ("ESP32_Main", "status_led.cpp"),
     ("ESP32_Main", "wifi_web.cpp"),
     ("examples/TestDispenseEvent", "TestDispenseEvent.ino"),

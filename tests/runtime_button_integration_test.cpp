@@ -56,6 +56,12 @@ void dispenserHomeAll() {}
 const char *doseStateName(DoseState) { return ""; }
 void netSyncBegin() {}
 void netSyncService() {}
+void netSyncPump() {}
+bool netSyncApplyCachedSchedule() { return false; }
+void scheduleCacheBegin() {}
+void scheduleCacheMarkClosed(const char*, uint32_t) {}
+bool scheduleCacheIsClosed(const char*, uint32_t) { return false; }
+uint32_t scheduleDayKey() { return 20260925; }
 bool netSyncLastCallOk() { return true; }
 const char *netSyncLastError() { return ""; }
 const char *netSyncConfigVersion() { return ""; }

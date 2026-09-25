@@ -5,6 +5,7 @@
 #include "certs.h"
 #include "rtc_lcd.h"
 #include "schedule_store.h"
+#include "schedule_cache.h"
 #include "secrets.h"
 
 #include <ArduinoJson.h>
@@ -31,6 +32,12 @@ bool lastCallOk = false;
 // ภาษาไทยใช้ 3 ไบต์ต่อตัวอักษรใน UTF-8 ข้อความไม่ยาวก็เต็ม 64 ไบต์แล้ว รหัส HTTP ท้ายข้อความจะถูกตัดทิ้ง
 char lastError[128] = "ยังไม่ได้เชื่อมต่อ";
 char configVersion[12] = "";
+// จาก sync ล่าสุด ส่งกลับไปที่ /wait ให้ server รู้ว่ากล่องเห็นข้อมูลรุ่นไหนอยู่
+char stateVersion[12] = "";
+// server รุ่นนี้มี /wait (ส่ง state_version มา) = รู้การเปลี่ยนทันที sync เต็มเป็นแค่ตาข่ายรองรับ
+bool waitSupported = false;
+unsigned long nextWaitAtMs = 0;
+unsigned long waitBlockedUntilMs = 0;
 
 RemoteCommand commands[MAX_PENDING_COMMANDS];
 uint8_t commandCount = 0;
@@ -228,7 +235,7 @@ void formatTimestamp(uint32_t localEpoch, char *out, size_t size)
 //   JOB_IDLE              loop หลักเป็นเจ้าของ เขียน request ได้
 //   JOB_QUEUED/RUNNING    task เบื้องหลังเป็นเจ้าของ
 //   JOB_DONE              loop หลักเป็นเจ้าของ อ่านผลแล้วคืนเป็น JOB_IDLE
-enum class JobKind : uint8_t { Sync, Events, Claim };
+enum class JobKind : uint8_t { Sync, Events, Claim, Wait };
 enum JobState : uint8_t { JOB_IDLE, JOB_QUEUED, JOB_RUNNING, JOB_DONE };
 
 // ผลที่ไม่ใช่รหัส HTTP (HTTPClient เองใช้ -1 ถึง -11)
@@ -243,6 +250,8 @@ struct NetJob {
   String body;
   int code = 0;
   String reply;
+  // /wait ถือสายนานกว่า request ทั่วไปมาก timeout ของ HTTP ต้องยาวกว่าที่ server ถือไว้
+  unsigned long timeoutMs = HTTP_TIMEOUT_MS;
 };
 
 NetJob job;
@@ -278,6 +287,9 @@ void runJob()
     else
     {
       prepare(http);
+      http.setTimeout(static_cast<uint16_t>(job.timeoutMs));
+      if (usesTls())
+        secureClient.setTimeout((job.timeoutMs + 999) / 1000);  // task นี้เป็นเจ้าของ client คนเดียว
       job.code = job.post ? http.POST(job.body) : http.GET();
       // อ่านให้ครบเป็น String ก่อน parse (ดูเหตุผลใน applySync)
       if (job.code > 0)
@@ -302,7 +314,8 @@ void workerLoop(void *)
 #endif
 
 /** ส่งงานให้ task เบื้องหลัง คืน false ถ้ามีงานค้างอยู่ (ทำได้ทีละงาน) */
-bool submitJob(JobKind kind, bool post, const char *url, const String &body)
+bool submitJob(JobKind kind, bool post, const char *url, const String &body,
+               unsigned long timeoutMs = HTTP_TIMEOUT_MS)
 {
   if (jobState.load() != JOB_IDLE)
     return false;
@@ -311,6 +324,7 @@ bool submitJob(JobKind kind, bool post, const char *url, const String &body)
   job.post = post;
   copyText(job.url, sizeof(job.url), url);
   job.body = body;
+  job.timeoutMs = timeoutMs;
   jobState.store(JOB_QUEUED);
 
 #if defined(ARDUINO_ARCH_ESP32)
@@ -326,17 +340,128 @@ bool submitJob(JobKind kind, bool post, const char *url, const String &body)
 }
 
 /**
- * server ขอให้ถามถี่ขึ้นได้ (ตอนมีคำสั่งค้าง) แต่ห่างกว่า SYNC_INTERVAL_MS ไม่ได้
+ * server ขอให้ถามถี่ขึ้นได้ (ตอนมีคำสั่งค้าง) แต่ห่างกว่าเพดานไม่ได้
  * แก้ตารางบนเว็บแล้วจอต้องเปลี่ยนภายในไม่กี่วินาที ไม่ว่า server รุ่นที่ deploy อยู่จะตั้งไว้เท่าไร
  * และไม่ถี่กว่า 2 วินาที กัน server ที่ตั้งค่าผิดสั่งให้ยิงรัว
  */
-unsigned long pollIntervalFromServer(unsigned long serverSec)
+unsigned long pollIntervalFromServer(unsigned long serverSec, bool pushAvailable)
 {
+  // มี /wait = server บอกเองทันทีที่มีอะไรเปลี่ยน sync เต็มจึงห่างได้ (แค่ตาข่ายรองรับ)
+  // ไม่มี = ต้องถามถี่เองเหมือนเดิม
+  const unsigned long ceilingMs = pushAvailable ? FULL_SYNC_MAX_MS : SYNC_INTERVAL_MS;
   // เทียบเป็นวินาทีก่อนคูณ ค่าใหญ่ผิดปกติจาก server คูณ 1000 แล้วจะล้นวนกลับเป็นค่าเล็ก
-  if (serverSec >= SYNC_INTERVAL_MS / 1000UL)
-    return SYNC_INTERVAL_MS;
+  if (serverSec >= ceilingMs / 1000UL)
+    return ceilingMs;
   const unsigned long ms = serverSec * 1000UL;
   return ms < 2000UL ? 2000UL : ms;
+}
+
+void describeFailure(const char *what, int code);  // นิยามอยู่ด้านล่าง
+
+/** วันในสัปดาห์ของ epoch ท้องถิ่น แบบเดียวกับที่ server ใช้ (1 ม.ค. 1970 เป็นวันพฤหัส) */
+const char *dayCodeForEpoch(uint32_t localEpoch)
+{
+  static const char *const CODES[7] = {"THU", "FRI", "SAT", "SUN", "MON", "TUE", "WED"};
+  return CODES[(localEpoch / 86400UL) % 7];
+}
+
+/**
+ * มื้อนี้ต้องกินวันนี้ไหม
+ * days ว่าง = ทุกวัน (รวมถึง server รุ่นเก่าที่ส่งเฉพาะมื้อของวันนี้มาโดยไม่มี days)
+ */
+bool doseRunsToday(const char *days, const char *today)
+{
+  if (!days || days[0] == '\0')
+    return true;
+  for (const char *p = days; *p;)
+  {
+    while (*p == ' ')
+      ++p;
+    if (strncmp(p, today, 3) == 0 && (p[3] == ',' || p[3] == ' ' || p[3] == '\0'))
+      return true;
+    const char *comma = strchr(p, ',');
+    if (!comma)
+      break;
+    p = comma + 1;
+  }
+  return false;
+}
+
+/**
+ * มื้อนี้ถือว่าจบแล้วตั้งแต่ตอนจัดตารางไหม (จะไม่เตือนอีก)
+ *   - server บอกว่ากินแล้ว: เชื่อได้เฉพาะเมื่อข้อมูลได้มาในวันนี้
+ *   - เครื่องบันทึกไว้เองว่าจบแล้ววันนี้: เชื่อเสมอ แม้ server ยังไม่รู้ (ส่งผลขึ้นไม่ทันก่อนไฟดับ)
+ */
+bool doseAlreadyHandled(bool serverSaysDone, bool serverDoneValidToday, const char *scheduleId, uint32_t dayKey)
+{
+  return (serverDoneValidToday && serverSaysDone) || scheduleCacheIsClosed(scheduleId, dayKey);
+}
+
+/** server ตอบ /wait แล้ว: มีอะไรเปลี่ยนก็ sync ทันที ไม่มีก็เปิดสายรอใหม่ทันที */
+void onWaitAnswer(bool changed)
+{
+  if (changed)
+    nextSyncAtMs = millis();
+  nextWaitAtMs = millis();
+}
+
+/** /wait ล้มเหลว: ถอยไปก่อนแล้วค่อยลองใหม่ ไม่ยิงรัวใส่ server ที่มีปัญหา */
+void onWaitFailed(int code)
+{
+  if (code == 404)
+  {
+    // server รุ่นที่ยังไม่มี /wait: กลับไปถามถี่ตามรอบปกติ แล้วค่อยลองใหม่ภายหลัง
+    waitSupported = false;
+    waitBlockedUntilMs = millis() + WAIT_UNSUPPORTED_RETRY_MS;
+    nextSyncAtMs = millis();
+    Serial.println("[wait] server ยังไม่รองรับการแจ้งทันที กลับไปถามเป็นรอบ");
+    return;
+  }
+  describeFailure("wait", code);
+  nextWaitAtMs = millis() + SYNC_RETRY_MS;
+}
+
+/**
+ * ตารางจาก JSON (ทั้ง sync สดและที่เก็บไว้ในเครื่อง) -> มื้อของวันนี้ในตารางที่ใช้เตือน
+ *
+ * `honorServerDone`: สถานะ "กินแล้ว" ของ server ใช้ได้เฉพาะวันที่ได้ข้อมูลมา
+ * มื้อที่เครื่องบันทึกว่าจบแล้ววันนี้ ถือว่าจบเสมอ ไม่ว่าข้อมูลจะมาจากไหน (กันจ่ายซ้ำ)
+ */
+void stageSchedule(JsonDocument &doc, const char *today, uint32_t dayKey, bool honorServerDone)
+{
+  scheduleBeginSync();
+  for (JsonObject slotJson : doc["slots"].as<JsonArray>())
+  {
+    const uint8_t number = slotJson["slot"] | 0;
+    const char *medicationId = slotJson["medication_id"] | "";
+    const int slotIndex = scheduleStageSlot(number,
+                                            slotJson["active"] | false,
+                                            medicationId,
+                                            slotJson["name"] | "",
+                                            slotJson["amount_per_dose"] | 1.0f);
+    if (slotIndex < 0)
+      continue;
+
+    // ขนาดเม็ดยาที่ผู้ใช้เลือกบนเว็บ -> ช่องปล่อยยาที่จะลองก่อน
+    // เว็บส่ง pill_size_mm เป็น 8/13/15 (ทรงกลม) หรือ 25 (ทรงรี/แคปซูล)
+    // null / ไม่ส่งมา = ไม่ระบุ ไล่ลองจากช่องเล็กสุด
+    const float pillSizeMm = slotJson["pill_size_mm"] | 0.0f;
+    scheduleStageSlotPillHole(slotIndex, pillHoleFromMillimetres(static_cast<long>(ceilf(pillSizeMm))));
+
+    for (JsonObject doseJson : slotJson["doses"].as<JsonArray>())
+    {
+      const int minutes = doseJson["minutes"] | parseTimeToMinutes(doseJson["time"] | "");
+      if (minutes < 0)
+        continue;
+      if (!doseRunsToday(doseJson["days"] | "", today))
+        continue;
+
+      const char *scheduleId = doseJson["schedule_id"] | "";
+      const bool done = doseAlreadyHandled(doseJson["done"] | false, honorServerDone, scheduleId, dayKey);
+      scheduleStageDose(slotIndex, scheduleId, doseJson["label"] | "", minutes, done);
+    }
+  }
+  scheduleCommitSync();
 }
 
 /** คืน job ให้ loop หลักใช้ต่อ ปล่อยหน่วยความจำของ request/response */
@@ -465,40 +590,14 @@ static bool applySync(int code, const String &body)
 
   copyText(configVersion, sizeof(configVersion), doc["config_version"] | "");
 
-  // ---- ตารางยาของวันนี้ ----
-  scheduleBeginSync();
-  for (JsonObject slotJson : doc["slots"].as<JsonArray>())
-  {
-    const uint8_t number = slotJson["slot"] | 0;
-    const char *medicationId = slotJson["medication_id"] | "";
-    const int slotIndex = scheduleStageSlot(number,
-                                            slotJson["active"] | false,
-                                            medicationId,
-                                            slotJson["name"] | "",
-                                            slotJson["amount_per_dose"] | 1.0f);
-    if (slotIndex < 0)
-      continue;
-
-    // ขนาดเม็ดยาที่ผู้ใช้เลือกบนเว็บ -> ช่องปล่อยยาที่จะลองก่อน
-    // เว็บส่ง pill_size_mm เป็น 8/13/15 (ทรงกลม) หรือ 25 (ทรงรี/แคปซูล)
-    // null / ไม่ส่งมา = ไม่ระบุ ไล่ลองจากช่องเล็กสุด
-    const float pillSizeMm = slotJson["pill_size_mm"] | 0.0f;
-    scheduleStageSlotPillHole(slotIndex, pillHoleFromMillimetres(static_cast<long>(ceilf(pillSizeMm))));
-
-    for (JsonObject doseJson : slotJson["doses"].as<JsonArray>())
-    {
-      const int minutes = doseJson["minutes"] | parseTimeToMinutes(doseJson["time"] | "");
-      if (minutes < 0)
-        continue;
-
-      scheduleStageDose(slotIndex,
-                        doseJson["schedule_id"] | "",
-                        doseJson["label"] | "",
-                        minutes,
-                        doseJson["done"] | false);
-    }
-  }
-  scheduleCommitSync();
+  // ---- ตารางยา: server ส่งทั้งสัปดาห์ เครื่องเลือกมื้อของวันนี้เอง แล้วเก็บสำเนาไว้ใช้ตอนออฟไลน์ ----
+  copyText(stateVersion, sizeof(stateVersion), doc["state_version"] | "");
+  waitSupported = stateVersion[0] != '\0';
+  const uint32_t nowLocal = localEpoch > 0 ? localEpoch : rtcLocalEpoch();
+  const uint32_t today = rtcDayKey();
+  stageSchedule(doc, nowLocal > 0 ? dayCodeForEpoch(nowLocal) : "", today, true);
+  if (scheduleCacheStore(body, stateVersion, today))
+    Serial.printf("[cache] เก็บตารางยารุ่น %s ไว้ในเครื่องแล้ว\n", stateVersion);
 
   // ---- คำสั่งที่เว็บฝากไว้ ----
   for (JsonObject commandJson : doc["commands"].as<JsonArray>())
@@ -516,7 +615,7 @@ static bool applySync(int code, const String &body)
   }
 
   const unsigned long nextPollSec = doc["next_poll_sec"] | (SYNC_INTERVAL_MS / 1000);
-  pollIntervalMs = pollIntervalFromServer(nextPollSec);
+  pollIntervalMs = pollIntervalFromServer(nextPollSec, waitSupported);
 
   nextSyncAtMs = millis() + pollIntervalMs;
   lastOkMs = millis();
@@ -530,77 +629,77 @@ static bool applySync(int code, const String &body)
   return true;
 }
 
-bool netSyncFetch()
-{
-  if (jobState.load() != JOB_IDLE)
-    return false;
-  if (!readyToSend())
-  {
-    lastCallOk = false;
-    nextSyncAtMs = millis() + SYNC_RETRY_MS;
-    return false;
-  }
-
-  char url[224];
-  char query[128];
-  snprintf(query,
-           sizeof(query),
-           "/api/device/sync?firmware_version=%s&ip_address=%s&rssi=%d&dry_run=%s",
-           FIRMWARE_VERSION,
-           WiFi.localIP().toString().c_str(),
-           static_cast<int>(WiFi.RSSI()),
-           !ENABLE_SERVO_MOVEMENT && DISPENSE_DRY_RUN ? "true" : "false");
-  buildUrl(url, sizeof(url), query);
-
-  // กันส่งซ้ำระหว่างรอผล รอบถัดไปจริงถูกตั้งตอนนำผลไปใช้
-  nextSyncAtMs = millis() + SYNC_RETRY_MS;
-  return submitJob(JobKind::Sync, false, url, String());
-}
-
-/** นำคำตอบของ /events ไปใช้ รันใน loop หลักเท่านั้น (แก้คิวผลการจ่ายยาใน NVS) */
-static bool applyEvents(int code, const String &reply)
-{
-  if (code != 200)
-  {
-    describeFailure("ส่งผลการจ่ายยา", code);
-    Serial.println("[events] เก็บไว้ในคิวเพื่อส่งใหม่");
-    return false;
-  }
-
-  JsonDocument response;
-  const DeserializationError error = deserializeJson(response, reply);
-
-  if (error)
-  {
-    // server รับไปแล้วแต่เราอ่านคำตอบไม่ออก: เก็บไว้ส่งใหม่ได้ เพราะกันซ้ำด้วย event_id
-    setError("อ่านคำตอบของ /events ไม่สำเร็จ");
-    return false;
-  }
-
-  uint8_t removed = 0;
-  for (JsonVariant id : response["accepted"].as<JsonArray>())
-  {
-    eventQueueRemove(id.as<const char *>());
-    ++removed;
-  }
-
-  // รายการที่ถูกปฏิเสธถือเป็นคำตอบสุดท้าย ต้องเอาออกไม่งั้นจะวนส่งไม่จบ
-  for (JsonObject item : response["rejected"].as<JsonArray>())
-  {
-    const char *id = item["event_id"] | "";
-    Serial.printf("[events] server ปฏิเสธ %s: %s\n", id, item["reason"] | "ไม่ระบุเหตุผล");
-    eventQueueRemove(id);
-    ++removed;
-  }
-
-  if (removed > 0)
-    eventQueuePersist();
-
-  Serial.printf("[events] ส่งสำเร็จ %u รายการ เหลือค้าง %u\n", removed, eventQueueSize());
-  return true;
-}
-
-bool netSyncFlushEvents()
+bool netSyncFetch()
+{
+  if (jobState.load() != JOB_IDLE)
+    return false;
+  if (!readyToSend())
+  {
+    lastCallOk = false;
+    nextSyncAtMs = millis() + SYNC_RETRY_MS;
+    return false;
+  }
+
+  char url[224];
+  char query[128];
+  snprintf(query,
+           sizeof(query),
+           "/api/device/sync?schema=2&firmware_version=%s&ip_address=%s&rssi=%d&dry_run=%s",
+           FIRMWARE_VERSION,
+           WiFi.localIP().toString().c_str(),
+           static_cast<int>(WiFi.RSSI()),
+           !ENABLE_SERVO_MOVEMENT && DISPENSE_DRY_RUN ? "true" : "false");
+  buildUrl(url, sizeof(url), query);
+
+  // กันส่งซ้ำระหว่างรอผล รอบถัดไปจริงถูกตั้งตอนนำผลไปใช้
+  nextSyncAtMs = millis() + SYNC_RETRY_MS;
+  return submitJob(JobKind::Sync, false, url, String());
+}
+
+/** นำคำตอบของ /events ไปใช้ รันใน loop หลักเท่านั้น (แก้คิวผลการจ่ายยาใน NVS) */
+static bool applyEvents(int code, const String &reply)
+{
+  if (code != 200)
+  {
+    describeFailure("ส่งผลการจ่ายยา", code);
+    Serial.println("[events] เก็บไว้ในคิวเพื่อส่งใหม่");
+    return false;
+  }
+
+  JsonDocument response;
+  const DeserializationError error = deserializeJson(response, reply);
+
+  if (error)
+  {
+    // server รับไปแล้วแต่เราอ่านคำตอบไม่ออก: เก็บไว้ส่งใหม่ได้ เพราะกันซ้ำด้วย event_id
+    setError("อ่านคำตอบของ /events ไม่สำเร็จ");
+    return false;
+  }
+
+  uint8_t removed = 0;
+  for (JsonVariant id : response["accepted"].as<JsonArray>())
+  {
+    eventQueueRemove(id.as<const char *>());
+    ++removed;
+  }
+
+  // รายการที่ถูกปฏิเสธถือเป็นคำตอบสุดท้าย ต้องเอาออกไม่งั้นจะวนส่งไม่จบ
+  for (JsonObject item : response["rejected"].as<JsonArray>())
+  {
+    const char *id = item["event_id"] | "";
+    Serial.printf("[events] server ปฏิเสธ %s: %s\n", id, item["reason"] | "ไม่ระบุเหตุผล");
+    eventQueueRemove(id);
+    ++removed;
+  }
+
+  if (removed > 0)
+    eventQueuePersist();
+
+  Serial.printf("[events] ส่งสำเร็จ %u รายการ เหลือค้าง %u\n", removed, eventQueueSize());
+  return true;
+}
+
+bool netSyncFlushEvents()
 {
   const uint8_t pending = eventQueueSize();
   if (pending == 0)
@@ -648,6 +747,81 @@ bool netSyncFlushEvents()
   return submitJob(JobKind::Events, true, url, body);
 }
 
+/** เปิดสายรอให้ server บอกว่ามีอะไรเปลี่ยน (ไม่ block) */
+static bool startWait()
+{
+  char url[224];
+  char query[128];
+  snprintf(query, sizeof(query), "/api/device/wait?state=%s&timeout_sec=%lu&dry_run=%s",
+           stateVersion, static_cast<unsigned long>(WAIT_TIMEOUT_SEC),
+           !ENABLE_SERVO_MOVEMENT && DISPENSE_DRY_RUN ? "true" : "false");
+  buildUrl(url, sizeof(url), query);
+  // เผื่อเวลาเครือข่ายเกินที่ server ถือสายไว้ ไม่งั้นกล่องตัดสายก่อน server ตอบ
+  return submitJob(JobKind::Wait, false, url, String(), (WAIT_TIMEOUT_SEC + 10UL) * 1000UL);
+}
+
+static void applyWait(int code, const String &reply)
+{
+  if (code != 200)
+  {
+    onWaitFailed(code);
+    return;
+  }
+  JsonDocument doc;
+  if (deserializeJson(doc, reply))
+  {
+    onWaitFailed(code);
+    return;
+  }
+  // อ่านไม่ออกว่าเปลี่ยนไหม ให้ถือว่าเปลี่ยน sync เกินหนึ่งรอบดีกว่าพลาดการแก้ไข
+  onWaitAnswer(doc["changed"] | true);
+}
+
+bool netSyncApplyCachedSchedule()
+{
+  const uint32_t nowLocal = rtcLocalEpoch();
+  if (nowLocal == 0)
+    return false;  // ยังไม่รู้วันที่ เลือกมื้อของวันนี้ไม่ได้
+
+  String body;
+  uint32_t fetchedDay = 0;
+  if (!scheduleCacheLoad(body, fetchedDay))
+    return false;
+
+  JsonDocument doc;
+  if (deserializeJson(doc, body))
+  {
+    Serial.println("[cache] อ่านตารางยาในเครื่องไม่ออก รอ sync จาก server");
+    return false;
+  }
+
+  const uint32_t today = rtcDayKey();
+  stageSchedule(doc, dayCodeForEpoch(nowLocal), today, fetchedDay == today);
+  Serial.printf("[cache] ใช้ตารางยาในเครื่อง (รุ่น %s) เตือนได้แม้ไม่มีเน็ต\n",
+                scheduleCacheStateVersion());
+  return true;
+}
+
+void netSyncPump()
+{
+  if (jobState.load() != JOB_IDLE)
+    return;
+  if (netSyncDue())
+  {
+    netSyncFetch();
+    return;
+  }
+  // server รุ่นเก่าที่ไม่มี /wait: ถามเป็นรอบตาม netSyncDue() อย่างเดียว
+  if (!waitSupported || stateVersion[0] == '\0')
+    return;
+  if (static_cast<long>(millis() - waitBlockedUntilMs) < 0 ||
+      static_cast<long>(millis() - nextWaitAtMs) < 0)
+    return;
+  if (!readyToSend())
+    return;
+  startWait();
+}
+
 void netSyncService()
 {
   if (jobState.load() != JOB_DONE)
@@ -660,6 +834,9 @@ void netSyncService()
       break;
     case JobKind::Events:
       applyEvents(job.code, job.reply);
+      break;
+    case JobKind::Wait:
+      applyWait(job.code, job.reply);
       break;
     case JobKind::Claim:
       break;  // คนรอเลิกรอไปแล้วเพราะหมดเวลา ทิ้งผลได้

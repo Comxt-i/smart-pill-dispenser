@@ -42,6 +42,14 @@ void alertBegin() {}
 void eventQueueBegin() {}
 void netSyncBegin() {}
 void netSyncService() {}
+void netSyncPump() {}
+bool netSyncApplyCachedSchedule() { return false; }
+void scheduleCacheBegin() {}
+// มื้อที่ถูกบันทึกลง NVS ว่า "จบแล้ววันนี้" (กันเตือน/จ่ายซ้ำหลังไฟดับ)
+std::vector<std::string> closedIds;
+void scheduleCacheMarkClosed(const char *id, uint32_t) { closedIds.push_back(id); }
+bool isClosed(const char *id) { for (const auto &c : closedIds) if (c == id) return true; return false; }
+bool scheduleCacheIsClosed(const char *id, uint32_t) { return isClosed(id); }
 bool netSyncLastCallOk() { return true; }
 const char *netSyncLastError() { return ""; }
 const char *netSyncConfigVersion() { return ""; }
@@ -102,7 +110,7 @@ void resetCase() {
   dispenserControlBegin(); buttonsBegin(); scheduleBegin(onDoseStateChanged);
   pulses.clear(); savedEvents.clear(); reservedKeys.clear();
   reservations=networkCalls=0; rejectKey="";
-  setupButton={}; inSetup=false; pendingDoseCount=deferredEventCount=0;
+  setupButton={}; inSetup=false; pendingDoseCount=deferredEventCount=0; closedIds.clear();
   cancelPressActive=false; clockWasValid=true; firstTickAfterClock=false;
   for (auto &owner:runOwner) owner=RunOwner::None;
   scheduleBeginSync();
@@ -147,10 +155,14 @@ int main() {
   if (!ENABLE_SERVO_MOVEMENT) {
     assert(savedEvents.size()==3 && pulses.empty());
     for (const auto &e:savedEvents) assert(strstr(e.note,"dry run") && strcmp(e.status,"DISPENSED")==0);
+    assert(isClosed("dose-1") && isClosed("dose-2") && isClosed("dose-3"));
     return 0;
   }
   assert(reservations==3 && pendingDoseCount==1);
   assert(dose(0).state==DoseState::Dispensing && dose(1).state==DoseState::Dispensing && dose(2).state==DoseState::Queued);
+  // จานที่เริ่มหมุนแล้วต้องถูกบันทึกทันที: ไฟดับตอนนี้ไม่รู้ว่ายาออกไปแล้วกี่เม็ด ห้ามเตือนซ้ำ
+  // ส่วนมื้อที่ยังรอคิว ยังไม่มียาออกมา ต้องเตือนใหม่ได้หลังเปิดเครื่อง
+  assert(isClosed("dose-1") && isClosed("dose-2") && !isClosed("dose-3"));
   assert(pulseCount(1)==1 && pulseCount(2)==0 && pulseCount(3)==0);
   const int beforeNetwork=networkCalls;
   tick(DISPENSE_STAGGER_MS);

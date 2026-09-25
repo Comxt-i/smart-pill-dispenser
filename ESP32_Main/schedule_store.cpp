@@ -459,6 +459,11 @@ const char *doseStateName(DoseState state)
   return "Unknown";
 }
 
+uint32_t scheduleDayKey()
+{
+  return currentDayKey;
+}
+
 bool scheduleConsumeDayRollover()
 {
   const bool rolled = dayRollover;

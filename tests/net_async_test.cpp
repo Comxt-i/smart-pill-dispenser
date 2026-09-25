@@ -6,6 +6,7 @@
 #include <cstring>
 #include "../ESP32_Main/net_sync.cpp"
 #include "../ESP32_Main/command_journal.cpp"
+#include "../ESP32_Main/schedule_cache.cpp"
 
 FakeHttp fakeHttp;
 SerialClass Serial;
@@ -22,6 +23,7 @@ int syncCommits = 0, queueRemovals = 0, queuePersists = 0;
 uint8_t queued = 0;
 PendingEvent pendingEvent = {};
 uint32_t rtcLocalEpoch() { return 1800000000; }
+uint32_t rtcDayKey() { return 20260926; }
 void rtcSyncFromEpoch(uint32_t) {}
 void scheduleBeginSync() {}
 void scheduleCommitSync() { ++syncCommits; }
@@ -43,10 +45,14 @@ int main()
   netSyncBegin();
 
   // ---- กฎความถี่: ช้ากว่า SYNC_INTERVAL_MS ไม่ได้ ไม่ว่า server จะสั่งมาเท่าไร ----
-  assert(pollIntervalFromServer(60) == SYNC_INTERVAL_MS);  // server รุ่นเก่าสั่ง 60 วินาที
-  assert(pollIntervalFromServer(0) == 2000UL);             // ไม่ยิงรัวถี่กว่า 2 วินาที
-  assert(pollIntervalFromServer(1) == 2000UL);
-  assert(pollIntervalFromServer(4000000000UL) == SYNC_INTERVAL_MS);  // คูณ 1000 แล้วต้องไม่ล้นวนกลับ
+  // server รุ่นเก่า (ไม่มี /wait): ต้องถามถี่เอง ช้ากว่า SYNC_INTERVAL_MS ไม่ได้
+  assert(pollIntervalFromServer(60, false) == SYNC_INTERVAL_MS);
+  assert(pollIntervalFromServer(4000000000UL, false) == SYNC_INTERVAL_MS);  // คูณ 1000 แล้วต้องไม่ล้นวนกลับ
+  // มี /wait: server บอกเองทันที sync เต็มจึงห่างได้ตามที่ server ขอ แต่ไม่เกินเพดาน
+  assert(pollIntervalFromServer(300, true) == 300000UL);
+  assert(pollIntervalFromServer(4000000000UL, true) == FULL_SYNC_MAX_MS);
+  assert(pollIntervalFromServer(0, true) == 2000UL);  // ไม่ยิงรัวถี่กว่า 2 วินาที
+  assert(pollIntervalFromServer(1, false) == 2000UL);
   assert(SYNC_INTERVAL_MS <= 10000UL);  // แก้บนเว็บแล้วจอต้องเปลี่ยนในไม่กี่วินาที
 
   // ---- ขอตาราง: ส่งงานแล้วกลับทันที ผลยังไม่ถูกใช้จนกว่า loop จะมารับ ----
@@ -127,5 +133,116 @@ int main()
   // เชื่อมต่อไม่ได้เลย (HTTPClient คืนค่าติดลบ): ยืนยันรหัสต้องคืน 0 ไม่ใช่เลขติดลบ
   fakeHttp.nextCode = -1;
   assert(netSyncCompleteSetup("0123456789ABCDEF0123") == 0);
+
+  // ======================= ตารางทั้งสัปดาห์ในเครื่อง =======================
+
+  // วันในสัปดาห์จากนาฬิกาเครื่อง ต้องตรงกับที่ server ใช้
+  assert(strcmp(dayCodeForEpoch(0), "THU") == 0);          // 1 ม.ค. 1970
+  assert(strcmp(dayCodeForEpoch(86399), "THU") == 0);      // วินาทีสุดท้ายของวันเดียวกัน
+  assert(strcmp(dayCodeForEpoch(86400), "FRI") == 0);
+  assert(strcmp(dayCodeForEpoch(1704067200UL), "MON") == 0);  // 1 ม.ค. 2024 เป็นวันจันทร์
+  assert(strcmp(dayCodeForEpoch(1790380800UL), "SAT") == 0);  // 26 ก.ย. 2026 เป็นวันเสาร์
+
+  // มื้อไหนต้องกินวันนี้
+  assert(doseRunsToday("", "WED"));            // ไม่ระบุวัน = ทุกวัน
+  assert(doseRunsToday(nullptr, "WED"));       // server รุ่นเก่า ไม่ส่ง days มาเลย
+  assert(doseRunsToday("MON,WED,FRI", "WED"));
+  assert(!doseRunsToday("MON,WED,FRI", "TUE"));
+  assert(doseRunsToday("MON, WED", "WED"));    // มีช่องว่างหลังจุลภาค
+  assert(!doseRunsToday("MON", ""));           // ไม่รู้ว่าวันนี้วันอะไร: ไม่เดา
+
+  // มื้อไหนถือว่าจบแล้ว (กันจ่ายซ้ำ)
+  scheduleCacheBegin();
+  assert(!doseAlreadyHandled(false, true, "dose-a", 20260926));
+  assert(doseAlreadyHandled(true, true, "dose-a", 20260926));    // server บอกว่ากินแล้ววันนี้
+  assert(!doseAlreadyHandled(true, false, "dose-a", 20260926));  // ข้อมูลของเมื่อวาน: ใช้ไม่ได้
+  scheduleCacheMarkClosed("dose-a", 20260926);                  // กินแล้วแต่ยังส่งขึ้น server ไม่ทัน
+  assert(doseAlreadyHandled(false, true, "dose-a", 20260926));
+  assert(doseAlreadyHandled(false, false, "dose-a", 20260926));  // ออฟไลน์หลังรีบูต: ยังจำได้
+  assert(!doseAlreadyHandled(false, true, "dose-a", 20260927));  // พรุ่งนี้เป็นมื้อใหม่
+
+  // ======================= server บอกเครื่องทันที (/wait) =======================
+
+  // server รุ่นใหม่ส่ง state_version มากับ sync (ArduinoJson ปลอมอ่านค่าไม่ได้ จึงตั้งตรงๆ)
+  testNow += FULL_SYNC_MAX_MS;
+  netSyncService();
+  assert(jobState.load() == JOB_IDLE);
+  copyText(stateVersion, sizeof(stateVersion), "abc12345");
+  waitSupported = true;
+  nextSyncAtMs = testNow + 300000UL;  // sync เต็มครั้งถัดไปอีกนาน
+  nextWaitAtMs = testNow;
+
+  // ไม่ถึงรอบ sync: เปิดสายรอ server แทนการถามรัว
+  fakeHttp.nextCode = 200;
+  int requestsBefore = fakeHttp.requests;
+  netSyncPump();
+  assert(fakeHttp.requests == requestsBefore + 1);
+  assert(lastUrlHas("/api/device/wait?state=abc12345&timeout_sec=15"));
+  // HTTP timeout ต้องยาวกว่าที่ server ถือสายไว้ ไม่งั้นกล่องตัดสายเองก่อน server ตอบ
+  assert(job.timeoutMs > WAIT_TIMEOUT_SEC * 1000UL);
+  netSyncPump();  // มีงานค้าง: ห้ามเปิดสายซ้อน
+  assert(fakeHttp.requests == requestsBefore + 1);
+
+  // server ตอบว่ามีอะไรเปลี่ยน (ArduinoJson ปลอมให้ค่าตั้งต้น = ถือว่าเปลี่ยน ซึ่งเป็นทางที่ปลอดภัย)
+  netSyncService();
+  assert(netSyncDue());  // sync ทันที ไม่รอรอบ 5 นาที
+  netSyncPump();
+  assert(lastUrlHas("/api/device/sync?schema=2"));  // ขอตารางทั้งสัปดาห์
+  netSyncService();
+
+  // server ตอบว่าไม่มีอะไรเปลี่ยน: เปิดสายรอใหม่ทันที โดยไม่ sync
+  copyText(stateVersion, sizeof(stateVersion), "abc12345");
+  waitSupported = true;
+  nextSyncAtMs = testNow + 300000UL;
+  onWaitAnswer(false);
+  assert(!netSyncDue());
+  requestsBefore = fakeHttp.requests;
+  netSyncPump();
+  assert(lastUrlHas("/api/device/wait") && fakeHttp.requests == requestsBefore + 1);
+
+  // /wait ล้มเหลว: ถอยไปก่อน ไม่ยิงซ้ำรัว
+  // (บนคอมงานถูกทำทันทีตอนส่ง จึงต้องตั้งผลปลอมก่อนส่ง ไม่ใช่หลัง)
+  netSyncService();  // เก็บผลของสายก่อนหน้าให้จบ
+  nextSyncAtMs = testNow + 300000UL;
+  nextWaitAtMs = testNow;
+  fakeHttp.nextCode = 502;
+  netSyncPump();
+  assert(lastUrlHas("/api/device/wait"));
+  netSyncService();
+  requestsBefore = fakeHttp.requests;
+  netSyncPump();
+  assert(fakeHttp.requests == requestsBefore);
+  testNow += SYNC_RETRY_MS;
+  fakeHttp.nextCode = 200;
+  netSyncPump();
+  assert(lastUrlHas("/api/device/wait") && fakeHttp.requests == requestsBefore + 1);
+  netSyncService();
+
+  // server ที่ยังไม่มี /wait (404): กลับไปถามเป็นรอบทันที และไม่ลอง /wait ซ้ำไปอีกนาน
+  copyText(stateVersion, sizeof(stateVersion), "abc12345");
+  waitSupported = true;
+  nextSyncAtMs = testNow + 300000UL;
+  nextWaitAtMs = testNow;
+  fakeHttp.nextCode = 404;
+  netSyncPump();
+  assert(lastUrlHas("/api/device/wait"));
+  netSyncService();
+  assert(!waitSupported && netSyncDue());
+  fakeHttp.nextCode = 200;
+  netSyncPump();
+  assert(lastUrlHas("/api/device/sync"));
+  netSyncService();
+  copyText(stateVersion, sizeof(stateVersion), "abc12345");
+  waitSupported = true;  // เช่น server ถูกอัปเดตแล้ว sync ถัดไปได้ state_version มา
+  nextSyncAtMs = testNow + 300000UL;
+  requestsBefore = fakeHttp.requests;
+  netSyncPump();
+  assert(fakeHttp.requests == requestsBefore);  // ยังอยู่ในช่วงพักหลัง 404
+  testNow += WAIT_UNSUPPORTED_RETRY_MS;
+  nextSyncAtMs = testNow + 300000UL;
+  netSyncPump();
+  assert(lastUrlHas("/api/device/wait"));
+  netSyncService();
+
   return 0;
 }
