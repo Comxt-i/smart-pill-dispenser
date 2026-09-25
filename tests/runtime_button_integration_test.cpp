@@ -52,8 +52,10 @@ void alertBegin() {}
 void eventQueueBegin() {}
 void scheduleBegin(void (*)(const DoseRef&, DoseState, DoseState)) {}
 void dispenserControlBegin() {}
+void dispenserHomeAll() {}
 const char *doseStateName(DoseState) { return ""; }
 void netSyncBegin() {}
+void netSyncService() {}
 bool netSyncLastCallOk() { return true; }
 const char *netSyncLastError() { return ""; }
 const char *netSyncConfigVersion() { return ""; }
@@ -145,6 +147,31 @@ int main() {
   assert(setupCalls == 0 && dispenseCalls == 1);
   release(ButtonId::Dispense);
   assert(dispenseCalls == 1 && setupCalls == 0);
+
+  // "It jumped to the setup screen by itself": a quick press, then the loop blocks for
+  // seconds inside an HTTPS sync. The user let go long ago, but the first sample after
+  // the block still carried the stale "held" state, which the gesture read as a 4 s hold.
+  // A press we could not watch must never be treated as a deliberate 3 s hold.
+  resetCase(); testDose.state = DoseState::Done;
+  press(ButtonId::Dispense);
+  levels[BUTTON_PINS[static_cast<uint8_t>(ButtonId::Dispense)]] = HIGH;  // released during the block
+  nowMs += 4000;                                                        // network call blocked the loop
+  tick(1); tick(BUTTON_DEBOUNCE_MS); tick(500);
+  assert(setupCalls == 0);
+  // ...and during an alert the same stale sample must not be read as a hold either.
+  resetCase();
+  press(ButtonId::Dispense);
+  levels[BUTTON_PINS[static_cast<uint8_t>(ButtonId::Dispense)]] = HIGH;
+  nowMs += 4000;
+  tick(1); tick(BUTTON_DEBOUNCE_MS); tick(500);
+  assert(setupCalls == 0);
+  // A real hold across a block is still a real hold: the pin is still down afterwards.
+  resetCase(); testDose.state = DoseState::Done;
+  press(ButtonId::Dispense);
+  nowMs += 4000;
+  tick(1);
+  assert(setupCalls == 1);
+  release(ButtonId::Dispense);
 
   // With no dose due, the same hold opens setup exactly as before.
   resetCase(); testDose.state = DoseState::Done;

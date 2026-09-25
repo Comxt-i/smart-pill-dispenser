@@ -41,6 +41,7 @@ bool rtcIsValid() { return true; }
 void alertBegin() {}
 void eventQueueBegin() {}
 void netSyncBegin() {}
+void netSyncService() {}
 bool netSyncLastCallOk() { return true; }
 const char *netSyncLastError() { return ""; }
 const char *netSyncConfigVersion() { return ""; }

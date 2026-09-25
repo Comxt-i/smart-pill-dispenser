@@ -296,7 +296,9 @@ constexpr unsigned long SETUP_IDLE_TIMEOUT_MS = 5UL * 60UL * 1000UL;
 constexpr char FIRMWARE_VERSION[] = "1.3.0";
 
 // รอบการดึงตารางยาเมื่อไม่มีคำสั่งค้าง (server อาจสั่งให้ถี่ขึ้นผ่าน next_poll_sec)
-constexpr unsigned long SYNC_INTERVAL_MS = 60UL * 1000UL;
+// ถามตารางจาก server อย่างน้อยทุกเท่านี้ แก้บนเว็บแล้วจอจะเปลี่ยนภายในไม่กี่วินาที
+// ทำได้เพราะการคุยกับ server อยู่ใน task เบื้องหลัง ไม่ทำให้ปุ่ม จอ หรือเสียงค้างอีกแล้ว
+constexpr unsigned long SYNC_INTERVAL_MS = 5UL * 1000UL;
 // เว้นระยะก่อน sync ใหม่หลังเรียกไม่สำเร็จ กันยิงรัวตอน server ล่ม
 constexpr unsigned long SYNC_RETRY_MS = 15UL * 1000UL;
 // รอบการพยายามส่งผลการจ่ายยาที่ค้างอยู่ในคิว
@@ -341,6 +343,10 @@ constexpr uint8_t MAX_PENDING_COMMANDS = 5; // คำสั่งจากเว
 // ---------------------------------------------------------------------------
 
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 40;
+// ห่างจากการอ่านปุ่มครั้งก่อนนานกว่านี้ = loop ค้าง เชื่อค่าที่อ่านได้ทันทีแทนการ debounce
+// ต้องมากกว่า BUTTON_DEBOUNCE_MS ชัดเจน และมากกว่ารอบ loop ปกติ (ไม่กี่มิลลิวินาที)
+constexpr unsigned long BUTTON_STALE_GAP_MS = 250;
+static_assert(BUTTON_STALE_GAP_MS > BUTTON_DEBOUNCE_MS * 3, "stale gap must dwarf the debounce window");
 // กดปุ่ม Cancel ค้างเกินเท่านี้ = สั่งหยุดกลไกทันที (กดสั้น = ข้ามมื้อยา)
 constexpr unsigned long CANCEL_HOLD_MS = 1200;
 
@@ -348,5 +354,12 @@ constexpr unsigned long CANCEL_HOLD_MS = 1200;
 constexpr unsigned long BEEP_ON_MS = 150;
 constexpr unsigned long BEEP_OFF_MS = 150;
 constexpr unsigned long ALERT_BEEP_PERIOD_MS = 5000;
-// ตั้งเป็น false ถ้าใช้ buzzer แบบ active (ต่อไฟแล้วดังเอง) และไม่ต้องการ PWM
+// ขั้วสัญญาณของโมดูล buzzer
+//   true  = ดังเมื่อขา IN เป็น HIGH (โมดูลที่ใช้ทรานซิสเตอร์ NPN ส่วนใหญ่)
+//   false = ดังเมื่อขา IN เป็น LOW  (โมดูล 3 ขาที่ใช้ PNP หลายรุ่น)
+// ตั้งผิดขั้วจะกลับด้าน: ร้องค้างตลอดเวลาที่ควรเงียบ และเงียบตอนที่ควรร้อง
 constexpr bool BUZZER_ACTIVE_HIGH = true;
+
+// ปิ๊บสั้นๆ หนึ่งครั้งตอนเปิดเครื่อง เพื่อให้รู้ทันทีว่า buzzer ต่อถูกขาและยังดังอยู่
+// ไม่ต้องรอให้ถึงเวลากินยาแล้วค่อยพบว่าเงียบ ตั้ง 0 เพื่อปิด
+constexpr unsigned long BUZZER_BOOT_CHIRP_MS = 120;

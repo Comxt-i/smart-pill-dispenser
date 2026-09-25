@@ -21,6 +21,9 @@ struct ButtonState {
 
 ButtonState states[BUTTON_COUNT];
 
+// เวลาที่อ่านปุ่มครั้งล่าสุด ใช้รู้ว่า loop ค้างไปนานแค่ไหนระหว่างสองครั้ง
+unsigned long lastUpdateMs = 0;
+
 uint8_t indexOf(ButtonId id)
 {
   return static_cast<uint8_t>(id);
@@ -40,16 +43,42 @@ void buttonsBegin()
     states[i].changedAtMs = now;
     states[i].pressedAtMs = 0;
   }
+  lastUpdateMs = now;
 }
 
 void buttonsUpdate()
 {
   const unsigned long now = millis();
 
+  // loop ค้างนานกว่านี้ (เช่นรอ HTTPS) = ระหว่างนั้นเราไม่เห็นปุ่มเลย
+  // หน้าสัมผัสหยุดเด้งไปนานแล้ว ค่าที่อ่านได้ตอนนี้จึงเชื่อได้ทันทีโดยไม่ต้องรอ debounce อีกรอบ
+  //
+  // ถ้ารอ debounce ตามปกติ สถานะ "กดอยู่" จากก่อนค้างจะติดไปอีกหนึ่งรอบ แล้วถูกตีความว่า
+  // กดค้างมาตลอดช่วงที่ค้าง การกดสั้นๆ จึงกลายเป็นกดค้าง 3 วินาที แล้วเปิดหน้า setup เอง
+  const bool stale = now - lastUpdateMs > BUTTON_STALE_GAP_MS;
+  lastUpdateMs = now;
+
   for (uint8_t i = 0; i < BUTTON_COUNT; ++i)
   {
     ButtonState &state = states[i];
     const bool raw = digitalRead(BUTTON_PINS[i]) == LOW;  // ปุ่มต่อลง GND
+
+    if (stale)
+    {
+      state.lastRaw = raw;
+      state.changedAtMs = now;
+      if (raw != state.stable)
+      {
+        state.stable = raw;
+        if (raw)
+        {
+          state.pressedLatch = true;
+          state.pressedAtMs = now;
+          state.holdReported = false;
+        }
+      }
+      continue;
+    }
 
     if (raw != state.lastRaw)
     {

@@ -15,6 +15,12 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include <atomic>
+#if defined(ARDUINO_ARCH_ESP32)
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#endif
+
 namespace {
 unsigned long nextSyncAtMs = 0;
 unsigned long lastOkMs = 0;
@@ -22,7 +28,8 @@ unsigned long pollIntervalMs = SYNC_INTERVAL_MS;
 uint32_t lastServerEpoch = 0;
 int tzOffsetMinutes = 420;
 bool lastCallOk = false;
-char lastError[64] = "ยังไม่ได้เชื่อมต่อ";
+// ภาษาไทยใช้ 3 ไบต์ต่อตัวอักษรใน UTF-8 ข้อความไม่ยาวก็เต็ม 64 ไบต์แล้ว รหัส HTTP ท้ายข้อความจะถูกตัดทิ้ง
+char lastError[128] = "ยังไม่ได้เชื่อมต่อ";
 char configVersion[12] = "";
 
 RemoteCommand commands[MAX_PENDING_COMMANDS];
@@ -34,8 +41,10 @@ void setError(const char *message);
 
 WiFiClient plainClient;
 WiFiClientSecure secureClient;
-bool tlsClientReady = false;
 bool ntpStarted = false;
+
+// 1 ม.ค. 2024 ใช้เป็นเส้นแบ่งว่านาฬิกาของระบบถูกตั้งแล้วหรือยัง (TLS ต้องใช้ตรวจอายุใบรับรอง)
+constexpr time_t MIN_VALID_EPOCH = 1704067200;
 
 /** true เมื่อ SERVER_BASE_URL เป็น https */
 bool usesTls()
@@ -51,9 +60,6 @@ bool usesTls()
  */
 bool systemClockReadyForTls()
 {
-  // 1 ม.ค. 2024 ใช้เป็นเส้นแบ่งว่านาฬิกาถูกตั้งแล้วหรือยัง
-  constexpr time_t MIN_VALID_EPOCH = 1704067200;
-
   if (time(nullptr) > MIN_VALID_EPOCH)
     return true;
 
@@ -80,37 +86,37 @@ bool systemClockReadyForTls()
   return false;
 }
 
+/** ตั้งค่า TLS ครั้งเดียวตอนเริ่ม ก่อนมี task เบื้องหลัง จะได้ไม่ต้องแชร์สถานะนี้ข้ามคอร์ */
+void initTlsClient()
+{
+  if (!usesTls())
+    return;
+  if (TLS_VERIFY_CERTIFICATE)
+  {
+    secureClient.setCACert(SERVER_ROOT_CA_PEM);
+  }
+  else
+  {
+    // ไม่ตรวจใบรับรอง = ใครดักกลางทางก็อ่าน API Key ได้ ใช้ได้เฉพาะตอนทดสอบ
+    secureClient.setInsecure();
+    Serial.println("[TLS] คำเตือน: ปิดการตรวจใบรับรองอยู่ (TLS_VERIFY_CERTIFICATE=false)");
+  }
+  secureClient.setTimeout(HTTP_TIMEOUT_MS / 1000);
+}
+
 /**
- * เลือก client ให้ตรงกับ scheme ของ SERVER_BASE_URL
- * คืน nullptr เมื่อใช้ https แต่ยังตั้งนาฬิกาไม่ได้
+ * client สำหรับ task เบื้องหลัง
+ *
+ * ห้ามเรียก systemClockReadyForTls() ตรงนี้ เพราะมันอ่าน rtcLocalEpoch() ซึ่ง "แก้ค่า" นาฬิกาซอฟต์แวร์
+ * ทุกครั้งที่อ่าน ถ้าสองคอร์เรียกพร้อมกันนาฬิกาจะเพี้ยน loop หลักเตรียมเวลาไว้ให้ก่อนส่ง job แล้ว
+ * ตรงนี้แค่เช็คซ้ำแบบอ่านอย่างเดียว
  */
-WiFiClient *networkClient()
+WiFiClient *workerClient()
 {
   if (!usesTls())
     return &plainClient;
-
-  if (!systemClockReadyForTls())
-  {
-    setError("รอตั้งนาฬิกาก่อนเชื่อมต่อ HTTPS");
+  if (time(nullptr) <= MIN_VALID_EPOCH)
     return nullptr;
-  }
-
-  if (!tlsClientReady)
-  {
-    if (TLS_VERIFY_CERTIFICATE)
-    {
-      secureClient.setCACert(SERVER_ROOT_CA_PEM);
-    }
-    else
-    {
-      // ไม่ตรวจใบรับรอง = ใครดักกลางทางก็อ่าน API Key ได้ ใช้ได้เฉพาะตอนทดสอบ
-      secureClient.setInsecure();
-      Serial.println("[TLS] คำเตือน: ปิดการตรวจใบรับรองอยู่ (TLS_VERIFY_CERTIFICATE=false)");
-    }
-    secureClient.setTimeout(HTTP_TIMEOUT_MS / 1000);
-    tlsClientReady = true;
-  }
-
   return &secureClient;
 }
 
@@ -206,11 +212,194 @@ void formatTimestamp(uint32_t localEpoch, char *out, size_t size)
            absOffset / 60,
            absOffset % 60);
 }
+
+// ---------------------------------------------------------------------------
+// งานเครือข่ายเบื้องหลัง
+// ---------------------------------------------------------------------------
+//
+// คุยกับ server ผ่าน HTTPS ครั้งหนึ่งใช้เวลาเป็นวินาที ถ้าทำใน loop หลักทั้งเครื่องจะค้างระหว่างนั้น:
+// ปุ่มไม่ตอบ จอไม่ขยับ เสียงเตือนสะดุด จึงย้ายเฉพาะ "การรับส่ง" ไป task แยกบนคอร์ 0
+//
+// กติกาที่ทำให้ปลอดภัย: task เบื้องหลังแตะได้แค่ `job` กับตัว HTTP เท่านั้น
+// ห้ามแตะตารางยา นาฬิกา คิวผลการจ่ายยา หรือตัวแปรอื่นของ loop หลัก
+// การสร้าง request และการนำผลไปใช้ทำใน loop หลักทั้งหมด
+//
+// ส่งต่อ job ด้วยสถานะเดียว เจ้าของ job มีทีละฝั่งเสมอ จึงไม่ต้องใช้ mutex:
+//   JOB_IDLE              loop หลักเป็นเจ้าของ เขียน request ได้
+//   JOB_QUEUED/RUNNING    task เบื้องหลังเป็นเจ้าของ
+//   JOB_DONE              loop หลักเป็นเจ้าของ อ่านผลแล้วคืนเป็น JOB_IDLE
+enum class JobKind : uint8_t { Sync, Events, Claim };
+enum JobState : uint8_t { JOB_IDLE, JOB_QUEUED, JOB_RUNNING, JOB_DONE };
+
+// ผลที่ไม่ใช่รหัส HTTP (HTTPClient เองใช้ -1 ถึง -11)
+constexpr int JOB_ERR_NO_WIFI = -1001;
+constexpr int JOB_ERR_CLOCK = -1002;
+constexpr int JOB_ERR_BEGIN = -1003;
+
+struct NetJob {
+  JobKind kind = JobKind::Sync;
+  bool post = false;
+  char url[256] = "";
+  String body;
+  int code = 0;
+  String reply;
+};
+
+NetJob job;
+std::atomic<uint8_t> jobState(JOB_IDLE);
+
+#if defined(ARDUINO_ARCH_ESP32)
+TaskHandle_t workerTask = nullptr;
+#endif
+
+/** ทำ job ที่รออยู่หนึ่งงาน รันบน task เบื้องหลัง (หรือทันทีในที่เดียวกันถ้าไม่มี task) */
+void runJob()
+{
+  jobState.store(JOB_RUNNING);
+  job.code = 0;
+  job.reply = String();
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    job.code = JOB_ERR_NO_WIFI;
+  }
+  else
+  {
+    WiFiClient *client = workerClient();
+    HTTPClient http;
+    if (!client)
+    {
+      job.code = JOB_ERR_CLOCK;
+    }
+    else if (!http.begin(*client, job.url))
+    {
+      job.code = JOB_ERR_BEGIN;
+    }
+    else
+    {
+      prepare(http);
+      job.code = job.post ? http.POST(job.body) : http.GET();
+      // อ่านให้ครบเป็น String ก่อน parse (ดูเหตุผลใน applySync)
+      if (job.code > 0)
+        job.reply = http.getString();
+      http.end();
+    }
+  }
+
+  jobState.store(JOB_DONE);
+}
+
+#if defined(ARDUINO_ARCH_ESP32)
+void workerLoop(void *)
+{
+  for (;;)
+  {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    if (jobState.load() == JOB_QUEUED)
+      runJob();
+  }
+}
+#endif
+
+/** ส่งงานให้ task เบื้องหลัง คืน false ถ้ามีงานค้างอยู่ (ทำได้ทีละงาน) */
+bool submitJob(JobKind kind, bool post, const char *url, const String &body)
+{
+  if (jobState.load() != JOB_IDLE)
+    return false;
+
+  job.kind = kind;
+  job.post = post;
+  copyText(job.url, sizeof(job.url), url);
+  job.body = body;
+  jobState.store(JOB_QUEUED);
+
+#if defined(ARDUINO_ARCH_ESP32)
+  if (workerTask)
+  {
+    xTaskNotifyGive(workerTask);
+    return true;
+  }
+#endif
+  // ไม่มี task (สร้างไม่สำเร็จ หรือคอมไพล์บนคอมเพื่อทดสอบ): ทำทันทีแบบเดิม
+  runJob();
+  return true;
+}
+
+/**
+ * server ขอให้ถามถี่ขึ้นได้ (ตอนมีคำสั่งค้าง) แต่ห่างกว่า SYNC_INTERVAL_MS ไม่ได้
+ * แก้ตารางบนเว็บแล้วจอต้องเปลี่ยนภายในไม่กี่วินาที ไม่ว่า server รุ่นที่ deploy อยู่จะตั้งไว้เท่าไร
+ * และไม่ถี่กว่า 2 วินาที กัน server ที่ตั้งค่าผิดสั่งให้ยิงรัว
+ */
+unsigned long pollIntervalFromServer(unsigned long serverSec)
+{
+  // เทียบเป็นวินาทีก่อนคูณ ค่าใหญ่ผิดปกติจาก server คูณ 1000 แล้วจะล้นวนกลับเป็นค่าเล็ก
+  if (serverSec >= SYNC_INTERVAL_MS / 1000UL)
+    return SYNC_INTERVAL_MS;
+  const unsigned long ms = serverSec * 1000UL;
+  return ms < 2000UL ? 2000UL : ms;
+}
+
+/** คืน job ให้ loop หลักใช้ต่อ ปล่อยหน่วยความจำของ request/response */
+void finishJob()
+{
+  job.body = String();
+  job.reply = String();
+  jobState.store(JOB_IDLE);
+}
+
+/** เงื่อนไขก่อนส่ง: รันใน loop หลักเท่านั้น เพราะอาจตั้งนาฬิการะบบจาก RTC */
+bool readyToSend()
+{
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    setError("Wi-Fi ยังไม่เชื่อมต่อ");
+    return false;
+  }
+  if (usesTls() && !systemClockReadyForTls())
+  {
+    setError("รอตั้งนาฬิกาก่อนเชื่อมต่อ HTTPS");
+    return false;
+  }
+  return true;
+}
+
+/** อธิบายผลที่ไม่ใช่ 200 ให้คนอ่านรู้ว่าต้องแก้อะไร */
+void describeFailure(const char *what, int code)
+{
+  if (code == JOB_ERR_NO_WIFI)
+    setError("Wi-Fi หลุดระหว่างส่ง");
+  else if (code == JOB_ERR_CLOCK)
+    setError("รอตั้งนาฬิกาก่อนเชื่อมต่อ HTTPS");
+  else if (code == JOB_ERR_BEGIN)
+    setError("เปิดการเชื่อมต่อ HTTP ไม่สำเร็จ");
+  else
+    // รหัสขึ้นก่อนเสมอ ต่อให้ข้อความถูกตัดก็ยังเห็นสาเหตุ
+    snprintf(lastError, sizeof(lastError), "HTTP %d: %s ล้มเหลว", code, what);
+  Serial.printf("[net] %s\n", lastError);
+}
 }
 
 void netSyncBegin()
 {
   commandJournalBegin();
+
+  // job ที่ค้างจากก่อนหน้า (เช่นเรียกซ้ำตอนทดสอบ) ห้ามถูกนำไปใช้ต่อ
+  if (jobState.load() == JOB_DONE)
+    finishJob();
+
+  initTlsClient();
+#if defined(ARDUINO_ARCH_ESP32)
+  if (!workerTask)
+  {
+    // คอร์ 0 เป็นคอร์เดียวกับ Wi-Fi stack ส่วน loop หลักอยู่คอร์ 1 จึงไม่แย่งเวลากัน
+    // stack 12 KB เผื่อ TLS handshake ซึ่งกินสแตกมาก
+    if (xTaskCreatePinnedToCore(workerLoop, "net", 12288, nullptr, 1, &workerTask, 0) != pdPASS)
+    {
+      workerTask = nullptr;
+      Serial.println("[net] สร้าง task เบื้องหลังไม่สำเร็จ จะคุยกับ server ใน loop หลักแทน (เครื่องจะค้างระหว่างส่ง)");
+    }
+  }
+#endif
   nextSyncAtMs = millis();
   commandCount = 0;
   commandHead = 0;
@@ -227,6 +416,8 @@ bool netSyncDue()
 {
   if (WiFi.status() != WL_CONNECTED)
     return false;
+  if (jobState.load() != JOB_IDLE)
+    return false;  // มีงานค้างอยู่ รอผลก่อน
   return static_cast<long>(millis() - nextSyncAtMs) >= 0;
 }
 
@@ -235,63 +426,22 @@ void netSyncRequestNow()
   nextSyncAtMs = millis();
 }
 
-bool netSyncFetch()
+/** นำผล sync ไปใช้ รันใน loop หลักเท่านั้น (แก้ตารางยา นาฬิกา และคิวคำสั่ง) */
+static bool applySync(int code, const String &body)
 {
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    setError("Wi-Fi ยังไม่เชื่อมต่อ");
-    lastCallOk = false;
-    return false;
-  }
-
-  char url[224];
-  char query[128];
-  snprintf(query,
-           sizeof(query),
-           "/api/device/sync?firmware_version=%s&ip_address=%s&rssi=%d&dry_run=%s",
-           FIRMWARE_VERSION,
-           WiFi.localIP().toString().c_str(),
-           static_cast<int>(WiFi.RSSI()),
-           !ENABLE_SERVO_MOVEMENT && DISPENSE_DRY_RUN ? "true" : "false");
-  buildUrl(url, sizeof(url), query);
-
-  WiFiClient *client = networkClient();
-  if (!client)
-  {
-    lastCallOk = false;
-    nextSyncAtMs = millis() + SYNC_RETRY_MS;
-    return false;
-  }
-
-  HTTPClient http;
-  if (!http.begin(*client, url))
-  {
-    setError("เปิดการเชื่อมต่อ HTTP ไม่สำเร็จ");
-    lastCallOk = false;
-    nextSyncAtMs = millis() + SYNC_RETRY_MS;
-    return false;
-  }
-  prepare(http);
-
-  const int code = http.GET();
   if (code != 200)
   {
-    snprintf(lastError, sizeof(lastError), "sync ล้มเหลว (HTTP %d)", code);
-    Serial.printf("[sync] %s\n", lastError);
-    http.end();
+    describeFailure("sync", code);
     lastCallOk = false;
     nextSyncAtMs = millis() + SYNC_RETRY_MS;
     return false;
   }
 
-  // อ่าน body ให้ครบเป็น String ก่อนแล้วค่อย parse
+  // body ถูกอ่านเป็น String จนครบแล้วใน runJob()
   //
   // ห้าม parse จาก http.getStream() ตรงๆ เพราะเมื่อ payload โตขึ้น (มียาหลายช่อง)
   // ข้อมูลจะมาเป็นหลายก้อนผ่าน TLS แล้ว ArduinoJson จะเจอสตรีมขาดกลางคัน
   // แล้วคืน IncompleteInput ทั้งที่ server ส่งมาครบ
-  const String body = http.getString();
-  http.end();
-
   JsonDocument doc;
   const DeserializationError error = deserializeJson(doc, body);
 
@@ -366,9 +516,7 @@ bool netSyncFetch()
   }
 
   const unsigned long nextPollSec = doc["next_poll_sec"] | (SYNC_INTERVAL_MS / 1000);
-  pollIntervalMs = nextPollSec * 1000UL;
-  if (pollIntervalMs < 2000UL)
-    pollIntervalMs = 2000UL;
+  pollIntervalMs = pollIntervalFromServer(nextPollSec);
 
   nextSyncAtMs = millis() + pollIntervalMs;
   lastOkMs = millis();
@@ -382,13 +530,83 @@ bool netSyncFetch()
   return true;
 }
 
-bool netSyncFlushEvents()
+bool netSyncFetch()
+{
+  if (jobState.load() != JOB_IDLE)
+    return false;
+  if (!readyToSend())
+  {
+    lastCallOk = false;
+    nextSyncAtMs = millis() + SYNC_RETRY_MS;
+    return false;
+  }
+
+  char url[224];
+  char query[128];
+  snprintf(query,
+           sizeof(query),
+           "/api/device/sync?firmware_version=%s&ip_address=%s&rssi=%d&dry_run=%s",
+           FIRMWARE_VERSION,
+           WiFi.localIP().toString().c_str(),
+           static_cast<int>(WiFi.RSSI()),
+           !ENABLE_SERVO_MOVEMENT && DISPENSE_DRY_RUN ? "true" : "false");
+  buildUrl(url, sizeof(url), query);
+
+  // กันส่งซ้ำระหว่างรอผล รอบถัดไปจริงถูกตั้งตอนนำผลไปใช้
+  nextSyncAtMs = millis() + SYNC_RETRY_MS;
+  return submitJob(JobKind::Sync, false, url, String());
+}
+
+/** นำคำตอบของ /events ไปใช้ รันใน loop หลักเท่านั้น (แก้คิวผลการจ่ายยาใน NVS) */
+static bool applyEvents(int code, const String &reply)
+{
+  if (code != 200)
+  {
+    describeFailure("ส่งผลการจ่ายยา", code);
+    Serial.println("[events] เก็บไว้ในคิวเพื่อส่งใหม่");
+    return false;
+  }
+
+  JsonDocument response;
+  const DeserializationError error = deserializeJson(response, reply);
+
+  if (error)
+  {
+    // server รับไปแล้วแต่เราอ่านคำตอบไม่ออก: เก็บไว้ส่งใหม่ได้ เพราะกันซ้ำด้วย event_id
+    setError("อ่านคำตอบของ /events ไม่สำเร็จ");
+    return false;
+  }
+
+  uint8_t removed = 0;
+  for (JsonVariant id : response["accepted"].as<JsonArray>())
+  {
+    eventQueueRemove(id.as<const char *>());
+    ++removed;
+  }
+
+  // รายการที่ถูกปฏิเสธถือเป็นคำตอบสุดท้าย ต้องเอาออกไม่งั้นจะวนส่งไม่จบ
+  for (JsonObject item : response["rejected"].as<JsonArray>())
+  {
+    const char *id = item["event_id"] | "";
+    Serial.printf("[events] server ปฏิเสธ %s: %s\n", id, item["reason"] | "ไม่ระบุเหตุผล");
+    eventQueueRemove(id);
+    ++removed;
+  }
+
+  if (removed > 0)
+    eventQueuePersist();
+
+  Serial.printf("[events] ส่งสำเร็จ %u รายการ เหลือค้าง %u\n", removed, eventQueueSize());
+  return true;
+}
+
+bool netSyncFlushEvents()
 {
   const uint8_t pending = eventQueueSize();
   if (pending == 0)
     return true;
 
-  if (WiFi.status() != WL_CONNECTED)
+  if (jobState.load() != JOB_IDLE || !readyToSend())
     return false;
 
   JsonDocument doc;
@@ -425,65 +643,28 @@ bool netSyncFlushEvents()
   char url[160];
   buildUrl(url, sizeof(url), "/api/device/events");
 
-  WiFiClient *client = networkClient();
-  if (!client)
-    return false;
-
-  HTTPClient http;
-  if (!http.begin(*client, url))
-  {
-    setError("เปิดการเชื่อมต่อ HTTP ไม่สำเร็จ");
-    return false;
-  }
-  prepare(http);
-
   String body;
   serializeJson(doc, body);
+  return submitJob(JobKind::Events, true, url, body);
+}
 
-  const int code = http.POST(body);
-  if (code != 200)
+void netSyncService()
+{
+  if (jobState.load() != JOB_DONE)
+    return;
+
+  switch (job.kind)
   {
-    snprintf(lastError, sizeof(lastError), "ส่งผลการจ่ายยาไม่สำเร็จ (HTTP %d)", code);
-    Serial.printf("[events] %s — เก็บไว้ในคิวเพื่อส่งใหม่\n", lastError);
-    http.end();
-    return false;
+    case JobKind::Sync:
+      applySync(job.code, job.reply);
+      break;
+    case JobKind::Events:
+      applyEvents(job.code, job.reply);
+      break;
+    case JobKind::Claim:
+      break;  // คนรอเลิกรอไปแล้วเพราะหมดเวลา ทิ้งผลได้
   }
-
-  // อ่านให้ครบก่อนแล้วค่อย parse ด้วยเหตุผลเดียวกับใน netSyncFetch()
-  const String reply = http.getString();
-  http.end();
-
-  JsonDocument response;
-  const DeserializationError error = deserializeJson(response, reply);
-
-  if (error)
-  {
-    // server รับไปแล้วแต่เราอ่านคำตอบไม่ออก: เก็บไว้ส่งใหม่ได้ เพราะกันซ้ำด้วย event_id
-    setError("อ่านคำตอบของ /events ไม่สำเร็จ");
-    return false;
-  }
-
-  uint8_t removed = 0;
-  for (JsonVariant id : response["accepted"].as<JsonArray>())
-  {
-    eventQueueRemove(id.as<const char *>());
-    ++removed;
-  }
-
-  // รายการที่ถูกปฏิเสธถือเป็นคำตอบสุดท้าย ต้องเอาออกไม่งั้นจะวนส่งไม่จบ
-  for (JsonObject item : response["rejected"].as<JsonArray>())
-  {
-    const char *id = item["event_id"] | "";
-    Serial.printf("[events] server ปฏิเสธ %s: %s\n", id, item["reason"] | "ไม่ระบุเหตุผล");
-    eventQueueRemove(id);
-    ++removed;
-  }
-
-  if (removed > 0)
-    eventQueuePersist();
-
-  Serial.printf("[events] ส่งสำเร็จ %u รายการ เหลือค้าง %u\n", removed, eventQueueSize());
-  return true;
+  finishJob();
 }
 
 uint32_t netSyncLastServerEpoch()
@@ -538,16 +719,39 @@ const char *netSyncConfigVersion()
 
 int netSyncCompleteSetup(const char *token)
 {
-  if (WiFi.status() != WL_CONNECTED) return 0;
-  WiFiClient *client = networkClient();
-  if (!client) return 0;
-  char url[224]; buildUrl(url, sizeof(url), "/api/device/setup/complete");
-  HTTPClient http;
-  if (!http.begin(*client, url)) return 0;
-  prepare(http);
-  JsonDocument doc; doc["token"] = token;
-  String body; serializeJson(doc, body);
-  const int code = http.POST(body);
-  http.end();
-  return code;
+  // ใช้ task เบื้องหลังตัวเดียวกัน ไม่เปิด TLS ซ้อนสองชุด (หน่วยความจำไม่พอ)
+  // รอได้เพราะเรียกระหว่างโหมดตั้งค่า ซึ่งเดิมก็ block ระหว่างยืนยันรหัสอยู่แล้ว
+  if (!readyToSend())
+    return 0;
+
+  const unsigned long limitMs = HTTP_TIMEOUT_MS * 3;
+  const unsigned long startedMs = millis();
+  while (jobState.load() != JOB_IDLE)
+  {
+    if (jobState.load() == JOB_DONE)
+      netSyncService();  // งานก่อนหน้าเสร็จแล้ว นำผลไปใช้ให้จบก่อน
+    else if (millis() - startedMs > limitMs)
+      return 0;
+    else
+      delay(10);
+  }
+
+  char url[224];
+  buildUrl(url, sizeof(url), "/api/device/setup/complete");
+  JsonDocument doc;
+  doc["token"] = token;
+  String body;
+  serializeJson(doc, body);
+  if (!submitJob(JobKind::Claim, true, url, body))
+    return 0;
+
+  while (jobState.load() != JOB_DONE)
+  {
+    if (millis() - startedMs > limitMs)
+      return 0;  // ผลที่มาทีหลังจะถูก netSyncService() ทิ้ง
+    delay(10);
+  }
+  const int code = job.code;
+  finishJob();
+  return code > 0 ? code : 0;
 }

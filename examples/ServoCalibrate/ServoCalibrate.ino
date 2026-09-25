@@ -5,11 +5,12 @@
 // ต่อสายเหมือนเครื่องจริงทุกอย่าง (servo จาน 1/2/3 ที่ GPIO 18/19/23)
 // ต้องจ่ายไฟ servo จาก adapter ไม่ใช่จากขา 5V ของ ESP32
 //
+// มุมบนจอเป็นมุมจริงของ servo 0-270 องศา กึ่งกลาง = 135 องศา = ตำแหน่งพัก
 // ช่องปล่อยยาเรียงจากเล็กไปใหญ่ ตรงกับตัวเลือกขนาดยาบนเว็บ:
-//   ช่อง 1 = กลม ไม่เกิน 8 mm         หมุนขวา  90 องศา
-//   ช่อง 2 = กลม ไม่เกิน 13 mm        หมุนขวา 135 องศา
-//   ช่อง 3 = กลม ไม่เกิน 15 mm        หมุนซ้าย  90 องศา
-//   ช่อง 4 = รี/แคปซูล ไม่เกิน 25 mm  หมุนซ้าย 135 องศา
+//   ช่อง 1 = กลม ไม่เกิน 8 mm         หมุนขวา  90 องศา  -> ราว 225 องศา
+//   ช่อง 2 = กลม ไม่เกิน 13 mm        หมุนขวา 135 องศา  -> ราว 265 องศา (เว้น 5 กันชนปลาย)
+//   ช่อง 3 = กลม ไม่เกิน 15 mm        หมุนซ้าย  90 องศา  -> ราว  45 องศา
+//   ช่อง 4 = รี/แคปซูล ไม่เกิน 25 mm  หมุนซ้าย 135 องศา  -> ราว   5 องศา (เว้น 5 กันชนปลาย)
 //
 // เปิด Serial Monitor ที่ 115200 ตั้ง Line ending เป็น No line ending
 // แล้วพิมพ์ตัวอักษรทีละตัว:
@@ -20,6 +21,7 @@
 //   r         บันทึกตำแหน่งนี้เป็น "ตำแหน่งพัก"
 //   5 6 7 8   บันทึกตำแหน่งนี้เป็นช่อง 1 / 2 / 3 / 4
 //   h         ไปตำแหน่งพักที่บันทึกไว้
+//   m         ไปกึ่งกลางพอดี 135 องศา (1500us) จุดเริ่มต้นที่ควรเป็นตำแหน่งพัก
 //   a s d f   ไปช่อง 1 / 2 / 3 / 4 ที่บันทึกไว้ (เพื่อเช็คหรือปรับต่อ)
 //   t         ทดสอบวิ่ง พัก -> ช่อง 1 -> พัก -> ช่อง 2 -> ... -> ช่อง 4 -> พัก
 //   p         พิมพ์ค่าทั้งหมดในรูปแบบที่ก๊อปไปวางได้เลย
@@ -72,22 +74,22 @@ void moveTo(uint8_t i, int us)
   servos[i].writeMicroseconds(us);
 }
 
-/** องศาโดยประมาณเทียบกับตำแหน่งพัก (บวก = ทิศที่พัลส์เพิ่ม) */
-float degreesFromRest(uint8_t i, int us)
+/** มุมจริงของ servo 0-270 องศา (500us = 0, 1500us = 135 กึ่งกลาง, 2500us = 270) */
+float servoDegrees(int us)
 {
-  return (us - restUs[i]) * 270.0f / (MAX_US - MIN_US);
+  return (us - MIN_US) * 270.0f / (MAX_US - MIN_US);
 }
 
 void report()
 {
   const uint8_t i = selected;
-  Serial.printf("จาน %u  ตอนนี้ %d us (%+.0f องศาจากพัก)  พัก=%d%s\n",
-                static_cast<unsigned>(i + 1), current[i], degreesFromRest(i, current[i]),
-                restUs[i], restSet[i] ? "" : "(ยังไม่ตั้ง)");
+  Serial.printf("จาน %u  ตอนนี้ %d us = %.0f องศา   พัก=%d us = %.0f องศา%s\n",
+                static_cast<unsigned>(i + 1), current[i], servoDegrees(current[i]),
+                restUs[i], servoDegrees(restUs[i]), restSet[i] ? "" : " (ยังไม่ตั้ง)");
   for (uint8_t h = 0; h < HOLES; ++h)
-    Serial.printf("   ช่อง %u %-14s %d us (%+.0f องศา)%s\n",
+    Serial.printf("   ช่อง %u %-14s %d us = %.0f องศา%s\n",
                   static_cast<unsigned>(h + 1), HOLE_NAME[h], holeUs[i][h],
-                  degreesFromRest(i, holeUs[i][h]), holeSet[i][h] ? "" : "  (ยังไม่ตั้ง)");
+                  servoDegrees(holeUs[i][h]), holeSet[i][h] ? "" : "  (ยังไม่ตั้ง)");
 }
 
 void printResult()
@@ -158,7 +160,7 @@ void setup()
   Serial.println();
   Serial.println("=== สอบเทียบ servo: ตำแหน่งพัก + ช่องปล่อยยา 4 ช่อง ===");
   Serial.println("1 2 3 = เลือกจาน | [ ] = +-10us | { } = +-1us | c = คลายแรง");
-  Serial.println("r = ตั้งพัก | 5 6 7 8 = ตั้งช่อง 1-4 | h = ไปพัก | a s d f = ไปช่อง 1-4");
+  Serial.println("r = ตั้งพัก | 5 6 7 8 = ตั้งช่อง 1-4 | h = ไปพัก | m = กึ่งกลาง 135 | a s d f = ไปช่อง 1-4");
   Serial.println("t = ทดสอบทุกช่อง | p = พิมพ์ผล");
   report();
 }
@@ -200,6 +202,7 @@ void loop()
     }
 
     case 'h': moveTo(i, restUs[i]); break;
+    case 'm': moveTo(i, REST_DEFAULT); break;  // กึ่งกลางพอดี 135 องศา
     case 'a': moveTo(i, holeUs[i][0]); break;
     case 's': moveTo(i, holeUs[i][1]); break;
     case 'd': moveTo(i, holeUs[i][2]); break;

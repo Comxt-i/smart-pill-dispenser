@@ -55,6 +55,14 @@ void alertBegin()
 {
   pinMode(BUZZER_PIN, OUTPUT);
   writeBuzzer(false);
+
+  // ตรวจสายตอนบูต: ใช้ delay ได้เพราะอยู่ใน setup() ยังไม่มีอะไรต้องเดินพร้อมกัน
+  if (BUZZER_BOOT_CHIRP_MS > 0)
+  {
+    writeBuzzer(true);
+    delay(BUZZER_BOOT_CHIRP_MS);
+    writeBuzzer(false);
+  }
   current = AlertPattern::None;
   oneShot = AlertPattern::None;
   activePattern = AlertPattern::None;

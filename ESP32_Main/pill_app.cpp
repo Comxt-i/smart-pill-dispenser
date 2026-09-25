@@ -1020,6 +1020,7 @@ void appBegin()
   rtcLcdBegin();
 
   dispenserControlBegin();
+  dispenserHomeAll();
 
   wifiWebBegin();
   netSyncBegin();
@@ -1072,18 +1073,24 @@ void appLoop()
   // A short button press above may have started motion in this same iteration.
   if (dispenserIsBusy()) { alertUpdate(); return; }
   // Keep reading the hold gesture promptly; defer network work until release.
+  // ทุกอย่างในนี้ไม่ block แล้ว: การรับส่งจริงอยู่ใน task เบื้องหลัง ตรงนี้แค่ส่งงานกับรับผล
   if (!buttonHeld(ButtonId::Dispense))
   {
-    if (netSyncDue()) netSyncFetch();
+    netSyncService();  // ผลที่เสร็จแล้ว (ตารางใหม่ เวลา คำสั่ง) นำไปใช้ตรงนี้
+
+    // ส่งผลการจ่ายยาก่อนขอตารางใหม่ เพราะ server ใช้ผลนี้ตัดสินว่ามื้อไหนเสร็จแล้ว
+    // ทำได้ทีละงาน ถ้าส่งไม่ได้ (มีงานค้าง) ต้องไม่ล้างธง ไม่อย่างนั้นผลจะรอไปอีก 10 วินาที
     const bool flushDue = millis() - lastEventFlushMs >= EVENT_FLUSH_INTERVAL_MS;
     if ((flushRequested || flushDue) && eventQueueSize() > 0) {
-      lastEventFlushMs = millis();
-      flushRequested = false;
-      netSyncFlushEvents();
+      if (netSyncFlushEvents()) {
+        lastEventFlushMs = millis();
+        flushRequested = false;
+      }
     } else if (flushDue) {
       lastEventFlushMs = millis();
       flushRequested = false;
     }
+    if (netSyncDue()) netSyncFetch();
   }
 
   // ช่องที่รอคิวอยู่เริ่มเองทันทีที่มีจานว่าง ผู้ใช้จึงกดปุ่มครั้งเดียวพอ

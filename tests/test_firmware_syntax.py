@@ -20,6 +20,8 @@ SOURCES = [
     ("ESP32_Main", "event_queue.cpp"),
     ("ESP32_Main", "marquee.cpp"),
     ("ESP32_Main", "net_sync.cpp"),
+    # คอมไพล์ซ้ำในโหมด ESP32 ไม่งั้นโค้ด task เบื้องหลังจะไม่ถูกตรวจเลยจนกว่าจะกด Upload
+    ("ESP32_Main", "net_sync.cpp", ["-DARDUINO_ARCH_ESP32"]),
     ("ESP32_Main", "pill_app.cpp"),
     ("ESP32_Main", "rtc_lcd.cpp"),
     ("ESP32_Main", "schedule_store.cpp"),

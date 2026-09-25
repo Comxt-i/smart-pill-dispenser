@@ -402,6 +402,26 @@ void dispenserControlBegin()
   outcomeCount = 0;
 }
 
+void dispenserHomeAll()
+{
+  if (!ENABLE_SERVO_MOVEMENT)
+    return;
+
+  for (uint8_t index = 0; index < DISPENSER_COUNT; ++index)
+  {
+    Servo &servo = dispenserServos[index];
+    servo.attach(SERVO_PINS[index], SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
+    if (!servo.attached())
+    {
+      Serial.printf("[servo] จาน %u ต่อ servo ไม่ได้ ข้ามการกลับกึ่งกลาง\n", static_cast<unsigned>(index + 1));
+      continue;
+    }
+    servo.writeMicroseconds(REST_PULSE_US[index]);
+    delay(MOVE_TIME_MS);
+    servo.detach();
+  }
+}
+
 DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills, int8_t preferredHole)
 {
   if (dispenser < 1 || dispenser > DISPENSER_COUNT || pills < 1 || pills > MAX_PILLS_PER_DOSE)

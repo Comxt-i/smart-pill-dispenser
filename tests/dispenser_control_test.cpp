@@ -131,6 +131,28 @@ int main()
   assert(!dispenserIsBusy() && dispenserHasCapacity());
   assert(!takeDispenseOutcome(outcome));  // ยังไม่เคยจ่าย จึงยังไม่มีผลให้อ่าน
 
+  // เปิดเครื่อง: ทุกจานกลับกึ่งกลาง (135 องศา) ทีละจาน แล้วปล่อยแรง
+  {
+    const unsigned long before = fakeMillis;
+    dispenserHomeAll();
+    if (ENABLE_SERVO_MOVEMENT)
+    {
+      assert(pulses.size() == DISPENSER_COUNT);
+      for (uint8_t i = 0; i < DISPENSER_COUNT; ++i)
+        assert(pulses[i].pin == SERVO_PINS[i] && pulses[i].value == REST_PULSE_US[i]);
+      // ทีละจาน: ใช้เวลาเท่ากับหมุนสามครั้งต่อกัน ไม่ใช่พร้อมกัน
+      assert(fakeMillis - before == DISPENSER_COUNT * MOVE_TIME_MS);
+      // 135 องศาของ servo 270 องศาคือกึ่งกลางพิสัยพอดี
+      assert(REST_PULSE_US[0] * 2 == SERVO_MIN_PULSE_US + SERVO_MAX_PULSE_US);
+    }
+    else
+    {
+      assert(pulses.empty());  // ปิดมอเตอร์อยู่ ห้ามขยับ
+    }
+    assert(attachedCount == 0);  // ปล่อยแรงแล้ว ไม่ครางค้าง
+    pulses.clear();
+  }
+
   assert(dispenseMedicine(0, 1) == DispenseResult::Invalid);
   assert(dispenseMedicine(DISPENSER_COUNT + 1, 1) == DispenseResult::Invalid);
   assert(dispenseMedicine(1, 0) == DispenseResult::Invalid);

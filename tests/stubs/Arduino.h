@@ -13,6 +13,7 @@ constexpr int INPUT_PULLUP = 2;
 
 extern unsigned long fakeMillis;
 inline unsigned long millis() { return fakeMillis; }
+inline void delay(unsigned long ms) { fakeMillis += ms; }
 
 /**
  * ระดับสัญญาณของแต่ละขา ตั้งค่าได้รายขาจากฝั่งเทสต์
