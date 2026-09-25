@@ -1,6 +1,7 @@
 #include "rtc_lcd.h"
 #include "config.h"
 #include "marquee.h"
+#include "software_clock.h"
 
 #include <DS1307RTC.h>
 #include <LiquidCrystal_I2C.h>
@@ -13,6 +14,8 @@ LiquidCrystal_I2C lcdMedicine(LCD_MEDICINE_ADDRESS, LCD_MEDICINE_COLS, LCD_MEDIC
 
 tmElements_t currentTime;
 bool clockValid = false;
+SoftwareClock softwareClock;
+const char *clockSource = "WAITING";
 bool timeLcdPresent = false, medicineLcdPresent = false, rtcPresent = false;
 unsigned long lastRefreshMs = 0;
 
@@ -232,16 +235,31 @@ void rtcLcdUpdate()
 
   lastRefreshMs = millis();
 
-  if (!rtcPresent || !RTC.read(currentTime))
-  {
+  const uint32_t fallback = softwareClock.localEpoch(millis());
+  tmElements_t rtcTime = {};
+  const bool rtcRead = rtcPresent && RTC.read(rtcTime);
+  const bool rtcFieldsValid = rtcRead && rtcTime.Year >= 54 && rtcTime.Year < 130 &&
+      rtcTime.Month >= 1 && rtcTime.Month <= 12 && rtcTime.Day >= 1 && rtcTime.Day <= 31 &&
+      rtcTime.Hour < 24 && rtcTime.Minute < 60 && rtcTime.Second < 60;
+  const uint32_t rtcEpoch = rtcFieldsValid ? static_cast<uint32_t>(makeTime(rtcTime)) : 0;
+  const uint32_t drift = rtcEpoch > fallback ? rtcEpoch - fallback : fallback - rtcEpoch;
+  // A stale RTC that failed to accept the server time must not override it.
+  if (rtcRead && SoftwareClock::validEpoch(rtcEpoch) && (!fallback || drift <= 5)) {
+    currentTime = rtcTime;
+    softwareClock.sync(rtcEpoch, millis());
+    clockValid = true;
+    clockSource = "RTC";
+  } else if (SoftwareClock::validEpoch(fallback)) {
+    breakTime(fallback, currentTime);
+    clockValid = true;
+    clockSource = "SERVER";
+  } else {
     clockValid = false;
-    writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], "RTC ERROR");
-    writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], "Check DS1307");
+    clockSource = "WAITING";
+    writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], "WAIT FOR TIME");
+    writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], "CONNECT WI-FI");
     return;
   }
-
-  // DS1307 ที่ยังไม่เคยตั้งเวลาจะรายงานปี 1970 ซึ่งใช้ตัดสินมื้อยาไม่ได้
-  clockValid = tmYearToCalendar(currentTime.Year) >= 2024;
 
   char line1[17];
   char line2[17];
@@ -265,33 +283,26 @@ void rtcLcdUpdate()
 
 void rtcSyncFromEpoch(uint32_t localEpoch)
 {
-  if (!rtcPresent || localEpoch == 0)
-    return;
-
-  // เขียน RTC เฉพาะตอนที่เพี้ยนจริง การเขียนทุกนาทีทำให้ EEPROM/บัสทำงานโดยไม่จำเป็น
-  const uint32_t current = rtcLocalEpoch();
-  const uint32_t drift = current > localEpoch ? current - localEpoch : localEpoch - current;
-  if (clockValid && drift <= 2)
-    return;
-
-  tmElements_t parts;
-  breakTime(static_cast<time_t>(localEpoch), parts);
-
-  if (RTC.write(parts))
-  {
-    currentTime = parts;
-    clockValid = true;
-    Serial.printf("[RTC] ตั้งเวลาตาม server: %02d:%02d:%02d (คลาดเคลื่อนเดิม %lu วินาที)\n",
-                  parts.Hour,
-                  parts.Minute,
-                  parts.Second,
-                  static_cast<unsigned long>(drift));
+  if (!SoftwareClock::validEpoch(localEpoch)) return;
+  const uint32_t previous = rtcLocalEpoch();
+  const uint32_t drift = previous > localEpoch ? previous - localEpoch : localEpoch - previous;
+  const bool wasUsingRtc = strcmp(clockSource, "RTC") == 0;
+  softwareClock.sync(localEpoch, millis());
+  breakTime(localEpoch, currentTime);
+  clockValid = true;
+  clockSource = "SERVER";
+  if (rtcPresent) {
+    if ((wasUsingRtc && drift <= 2) || RTC.write(currentTime)) {
+      clockSource = "RTC";
+    } else {
+      Serial.println("[Clock] RTC write failed; continuing with server time");
+    }
   }
-  else
-  {
-    Serial.println("[RTC] เขียนเวลาลง DS1307 ไม่สำเร็จ");
-  }
+  if (!previous)
+    Serial.printf("[Clock] Time ready via %s\n", clockSource);
 }
+
+const char *rtcClockSource() { return clockSource; }
 
 bool rtcIsValid()
 {
@@ -317,7 +328,7 @@ uint32_t rtcLocalEpoch()
 {
   if (!clockValid)
     return 0;
-  return static_cast<uint32_t>(makeTime(currentTime));
+  return softwareClock.localEpoch(millis());
 }
 
 void lcdSetMedicineScreen(const char *const *lines,

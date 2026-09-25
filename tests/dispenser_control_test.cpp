@@ -143,10 +143,11 @@ int main()
 
     dropPill(unit);
 
-    // ยังไม่ครบเวลาเดินทาง ห้ามเปลี่ยนช่วง แม้จะนับเม็ดครบแล้วก็ตาม
-    assert(pulses.size() == 1 && dispenserIsBusy());
+    // Reaching the target immediately commands return and braking.
+    assert(pulses.size() == (ENABLE_PILL_SENSOR ? 2u : 1u));
+    assert(dispenserIsBusy());
 
-    advance(MOVE_TIME_MS);  // จบ Releasing -> Returning
+    if (!ENABLE_PILL_SENSOR) advance(MOVE_TIME_MS);  // Releasing -> Returning
     assert(pulses.size() == 2 && pulses[1].value == REST_PULSE_US[unit - 1]);
     // ขากลับต้องเบรกล็อกแกน: IN1 = PWM เต็ม และ IN2 = HIGH
     assert(lastVibrationPwm(unit) == 255 && lastVibrationDir(unit) == HIGH);
@@ -205,26 +206,16 @@ int main()
     if (startedUnits < DISPENSER_COUNT)
       assert(dispenseMedicine(static_cast<uint8_t>(startedUnits + 1), 1) == DispenseResult::Busy);
 
-    // ตัวนับแยกรายจาน หยดพร้อมกันแล้วต้องไม่กวนกัน
+    // Each target immediately returns its own channel; finish at different times.
     dropPill(1);
-    dropPill(2);
-
-    advance(MOVE_TIME_MS - DISPENSE_STAGGER_MS);  // จานหนึ่งเข้า Returning
     assert(pulseCountFor(1) == 2 && pulseCountFor(2) == 1);
-
-    advance(DISPENSE_STAGGER_MS);  // จานสองเข้า Returning
+    advance(DISPENSE_STAGGER_MS);
+    dropPill(2);
     assert(pulseCountFor(2) == 2);
-    assert(dispenserIsBusy());
-
-    advance(MOVE_TIME_MS - DISPENSE_STAGGER_MS);  // จานหนึ่งจบ
-    assert(dispenserIsBusy());       // จานสองยังทำงานอยู่
-    assert(dispenserHasCapacity());  // แต่มีที่ว่างแล้ว
+    advance(MOVE_TIME_MS - DISPENSE_STAGGER_MS);
+    assert(dispenserIsBusy() && dispenserHasCapacity());
     assert(dispenseMedicine(3, 1) == DispenseResult::Started);
-
-    // -----------------------------------------------------------------------
-    // คิวผลลัพธ์ต้องเก็บได้หลายใบ ไม่ใช่ทับกันเหลือใบเดียว
-    // -----------------------------------------------------------------------
-    advance(DISPENSE_STAGGER_MS);  // จานสองจบ
+    advance(DISPENSE_STAGGER_MS); // Channel 2 finishes; channel 3 starts.
 
     assert(takeDispenseOutcome(outcome));
     assert(outcome.dispenser == 1 && outcome.dispensedPills == 1 && !outcome.cancelled);
@@ -298,12 +289,9 @@ int main()
     // ลำแสงที่ถูกบังค้างไว้ตั้งแต่ก่อนเริ่ม ต้องไม่ถูกนับเป็นเม็ดใหม่
     // -----------------------------------------------------------------------
     pinLevel[PILL_SENSOR_PINS[0]] = PILL_SENSOR_ACTIVE_LOW ? LOW : HIGH;
-    assert(dispenseMedicine(1, 1) == DispenseResult::Started);
-    advance(MOVE_TIME_MS);
-    advance(MOVE_TIME_MS);
-    assert(dispenserIsBusy());  // ไม่มีขอบขาลงใหม่ จึงยังนับไม่ได้
-    stopDispenser();
-    (void)takeDispenseOutcome(outcome);
+    const auto beforeBlocked = pulses.size();
+    assert(dispenseMedicine(1, 1) == DispenseResult::SensorBlocked);
+    assert(!dispenserIsBusy() && pulses.size() == beforeBlocked);
     pinLevel[PILL_SENSOR_PINS[0]] = PILL_SENSOR_ACTIVE_LOW ? HIGH : LOW;
   }
 
@@ -367,7 +355,7 @@ int main()
   assert(dispenseMedicine(3, 1) == DispenseResult::Started);
   if (ENABLE_PILL_SENSOR)
     dropPill(3);
-  advance(MOVE_TIME_MS);
+  advance(MOVE_TIME_MS / 2);
   assert(pulses.size() == 2 && attachedCount == 1);
   advance(MOVE_TIME_MS);
 

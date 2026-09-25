@@ -44,11 +44,14 @@ void rtcLcdUpdate();
 
 // ---- นาฬิกา ----
 
-/** ตั้ง DS1307 ตามเวลาท้องถิ่นที่ server ส่งมา (เขียนเฉพาะเมื่อเพี้ยนเกิน 2 วินาที) */
+/** ตั้งนาฬิกาใน RAM จาก server และเขียน DS1307 หากมี; ไม่มี RTC ก็เดินเวลาต่อได้จนไฟดับ */
 void rtcSyncFromEpoch(uint32_t localEpoch);
 
-/** false เมื่ออ่าน DS1307 ไม่ได้หรือยังไม่เคยตั้งเวลา ห้ามใช้ตารางยาตัดสินใจขณะนี้ */
+/** false เมื่อยังไม่มีเวลาจากทั้ง RTC และ server ห้ามใช้ตารางยาตัดสินใจขณะนี้ */
 bool rtcIsValid();
+
+/** RTC, SERVER (volatile clock), or WAITING. */
+const char *rtcClockSource();
 
 /** นาทีนับจากเที่ยงคืน (-1 เมื่อนาฬิกายังไม่พร้อม) */
 int rtcMinutesOfDay();

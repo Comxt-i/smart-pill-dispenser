@@ -15,7 +15,7 @@ class MarqueeTest(unittest.TestCase):
         self.assertIsNotNone(compiler, "Install a C++ compiler to run these tests")
         with tempfile.TemporaryDirectory() as directory:
             build = Path(directory)
-            for name in ("config.h", "marquee.h", "marquee.cpp"):
+            for name in ("config.h", "hardware_profile.h", "marquee.h", "marquee.cpp"):
                 shutil.copy(ROOT / "ESP32_Main" / name, build / name)
             executable = build / "marquee_test"
             subprocess.run([

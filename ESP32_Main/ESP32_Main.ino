@@ -12,6 +12,8 @@ void setup()
   Serial.println();
   Serial.printf("Smart Pill Dispenser firmware %s\n", FIRMWARE_VERSION);
 
+  Serial.println(ENABLE_SERVO_MOVEMENT ? "Mode: HARDWARE (motion enabled)" : "Mode: SIMULATION (no motion)");
+
   wifiCheckSetupButtonAtBoot();
 
   // ตรวจสภาพเส้นสัญญาณก่อนเปิดใช้บัส ต้องทำก่อน Wire.begin() เท่านั้น

@@ -1,4 +1,5 @@
 #include "net_sync.h"
+#include "command_journal.h"
 #include "certs.h"
 #include "rtc_lcd.h"
 #include "schedule_store.h"
@@ -161,6 +162,9 @@ int parseTimeToMinutes(const char *time)
 
 void pushCommand(const RemoteCommand &command)
 {
+  if (commandJournalContains(command.id)) return;
+  for (uint8_t i = 0; i < commandCount; ++i)
+    if (strcmp(commands[(commandHead + i) % MAX_PENDING_COMMANDS].id, command.id) == 0) return;
   if (commandCount >= MAX_PENDING_COMMANDS)
     return;
 
@@ -204,6 +208,7 @@ void formatTimestamp(uint32_t localEpoch, char *out, size_t size)
 
 void netSyncBegin()
 {
+  commandJournalBegin();
   nextSyncAtMs = millis();
   commandCount = 0;
   commandHead = 0;
@@ -241,10 +246,11 @@ bool netSyncFetch()
   char query[128];
   snprintf(query,
            sizeof(query),
-           "/api/device/sync?firmware_version=%s&ip_address=%s&rssi=%d",
+           "/api/device/sync?firmware_version=%s&ip_address=%s&rssi=%d&dry_run=%s",
            FIRMWARE_VERSION,
            WiFi.localIP().toString().c_str(),
-           static_cast<int>(WiFi.RSSI()));
+           static_cast<int>(WiFi.RSSI()),
+           !ENABLE_SERVO_MOVEMENT && DISPENSE_DRY_RUN ? "true" : "false");
   buildUrl(url, sizeof(url), query);
 
   WiFiClient *client = networkClient();
@@ -339,7 +345,8 @@ bool netSyncFetch()
   // ---- คำสั่งที่เว็บฝากไว้ ----
   for (JsonObject commandJson : doc["commands"].as<JsonArray>())
   {
-    RemoteCommand command;
+    RemoteCommand command = {};
+    command.receivedAtMs = millis();
     copyText(command.id, sizeof(command.id), commandJson["id"] | "");
     copyText(command.type, sizeof(command.type), commandJson["type"] | "DISPENSE");
     copyText(command.scheduleId, sizeof(command.scheduleId), commandJson["schedule_id"] | "");
@@ -483,10 +490,19 @@ int netSyncTimezoneOffsetMinutes()
 
 bool netSyncTakeCommand(RemoteCommand &command)
 {
+  while (commandCount > 0 && millis() - commands[commandHead].receivedAtMs >= 15UL * 60UL * 1000UL) {
+    commandHead = (commandHead + 1) % MAX_PENDING_COMMANDS;
+    --commandCount;
+  }
   if (commandCount == 0)
     return false;
 
-  command = commands[commandHead];
+  const RemoteCommand &next = commands[commandHead];
+  if (strcmp(next.type, "DISPENSE") == 0 && !commandJournalReserve(next.id, rtcLocalEpoch())) {
+    setError("Command journal unavailable; motion blocked");
+    return false;
+  }
+  command = next;
   commandHead = (commandHead + 1) % MAX_PENDING_COMMANDS;
   --commandCount;
   return true;

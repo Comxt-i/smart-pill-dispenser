@@ -12,6 +12,7 @@ struct RemoteCommand {
   char scheduleId[40];
   uint8_t slot;
   float amount;
+  unsigned long receivedAtMs; // Local receipt time; expire queued commands after 15 minutes.
 };
 
 void netSyncBegin();

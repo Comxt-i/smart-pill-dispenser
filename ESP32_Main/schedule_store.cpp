@@ -412,7 +412,7 @@ uint8_t scheduleSnoozeCount(const DoseRef &ref)
 bool doseIsOpen(const Dose &dose)
 {
   return dose.state == DoseState::Pending || dose.state == DoseState::Alerting ||
-         dose.state == DoseState::Snoozed || dose.state == DoseState::Dispensing;
+         dose.state == DoseState::Snoozed || dose.state == DoseState::Dispensing || dose.state == DoseState::Queued;
 }
 
 int doseEffectiveMinutes(const Dose &dose)
@@ -428,11 +428,13 @@ const char *doseStateName(DoseState state)
   {
     case DoseState::Pending: return "Pending";
     case DoseState::Alerting: return "Alerting";
+    case DoseState::Queued: return "Queued";
     case DoseState::Dispensing: return "Dispensing";
     case DoseState::Done: return "Done";
     case DoseState::Missed: return "Missed";
     case DoseState::Skipped: return "Skipped";
     case DoseState::Snoozed: return "Snoozed";
+    case DoseState::Failed: return "Failed";
   }
   return "Unknown";
 }

@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 
-enum class DispenseResult { Started, Invalid, Disabled, Busy, Cancelled, ServoError };
+enum class DispenseResult { Started, Invalid, Disabled, Busy, Cancelled, ServoError, SensorBlocked };
 
 /**
  * ผลของการจ่ายยาหนึ่งครั้งที่ "จบแล้ว" ไม่ว่าจะจบครบหรือถูกยกเลิกกลางคัน

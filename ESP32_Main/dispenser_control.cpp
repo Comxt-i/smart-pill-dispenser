@@ -233,6 +233,14 @@ void updateRun(uint8_t index, unsigned long now)
   if (run.phase == Phase::Idle)
     return;
 
+  // No pill may be counted before this channel actually starts.
+  if (run.phase == Phase::WaitingStart) {
+    if (now - run.phaseStartedMs >= run.startDelayMs) {
+      if (ENABLE_PILL_SENSOR && readSensor(index)) finishRun(index, false);
+      else beginPhase(index, Phase::Releasing, now);
+    }
+    return;
+  }
   tickKick(index, now);
   pollSensor(index, now);
 
@@ -246,7 +254,7 @@ void updateRun(uint8_t index, unsigned long now)
       return;
 
     case Phase::Releasing:
-      if (elapsed < MOVE_TIME_MS)
+      if (!run.targetReached && elapsed < MOVE_TIME_MS)
         return;
       // ถึงปลายทางแล้ว ต้องพาจานกลับตำแหน่งพักเสมอ แม้จะได้เม็ดครบแล้วก็ตาม
       beginPhase(index, Phase::Returning, now);
@@ -333,6 +341,9 @@ DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills)
   const uint8_t running = activeCount();
   if (running >= MAX_CONCURRENT_DISPENSERS)
     return DispenseResult::Busy;
+
+  if (ENABLE_PILL_SENSOR && readSensor(index))
+    return DispenseResult::SensorBlocked;
 
   Servo &servo = dispenserServos[index];
   servo.attach(SERVO_PINS[index], SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);

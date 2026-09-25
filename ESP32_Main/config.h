@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include "hardware_profile.h"
 
 constexpr uint8_t I2C_SDA_PIN = 21;
 constexpr uint8_t I2C_SCL_PIN = 22;
@@ -44,7 +45,7 @@ constexpr uint8_t DISPENSER_COUNT = 3;
 constexpr uint8_t SERVO_PINS[DISPENSER_COUNT] = {18, 19, 23};
 
 // Keep motion disabled until calibrated without pills.
-constexpr bool ENABLE_SERVO_MOVEMENT = false;
+constexpr bool ENABLE_SERVO_MOVEMENT = PILLBOX_REAL_HARDWARE;
 
 /**
  * โหมดทดสอบระบบทั้งวงจรโดยที่ยังไม่ได้ต่อ Servo
@@ -57,12 +58,20 @@ constexpr bool ENABLE_SERVO_MOVEMENT = false;
  *
  * ต้องตั้งกลับเป็น false เมื่อต่อ Servo แล้ว
  */
-constexpr bool DISPENSE_DRY_RUN = true;
+constexpr bool DISPENSE_DRY_RUN = !ENABLE_SERVO_MOVEMENT;
 constexpr int SERVO_MIN_PULSE_US = 1000;
 constexpr int SERVO_MAX_PULSE_US = 2000;
-constexpr int REST_PULSE_US[DISPENSER_COUNT] = {1500, 1500, 1500};
-constexpr int RELEASE_PULSE_US[DISPENSER_COUNT] = {1750, 1750, 1750};
-constexpr unsigned long MOVE_TIME_MS = 700;
+constexpr int REST_PULSE_US[DISPENSER_COUNT] = PILLBOX_REST_PULSES;
+constexpr int RELEASE_PULSE_US[DISPENSER_COUNT] = PILLBOX_RELEASE_PULSES;
+constexpr unsigned long MOVE_TIME_MS = PILLBOX_MOVE_TIME_MS;
+static_assert(MOVE_TIME_MS > 0 && MOVE_TIME_MS <= 5000, "Invalid servo travel time");
+static_assert(REST_PULSE_US[0] >= SERVO_MIN_PULSE_US && REST_PULSE_US[0] <= SERVO_MAX_PULSE_US &&
+              REST_PULSE_US[1] >= SERVO_MIN_PULSE_US && REST_PULSE_US[1] <= SERVO_MAX_PULSE_US &&
+              REST_PULSE_US[2] >= SERVO_MIN_PULSE_US && REST_PULSE_US[2] <= SERVO_MAX_PULSE_US &&
+              RELEASE_PULSE_US[0] >= SERVO_MIN_PULSE_US && RELEASE_PULSE_US[0] <= SERVO_MAX_PULSE_US &&
+              RELEASE_PULSE_US[1] >= SERVO_MIN_PULSE_US && RELEASE_PULSE_US[1] <= SERVO_MAX_PULSE_US &&
+              RELEASE_PULSE_US[2] >= SERVO_MIN_PULSE_US && RELEASE_PULSE_US[2] <= SERVO_MAX_PULSE_US,
+              "Servo calibration exceeds pulse limits");
 
 // ---------------------------------------------------------------------------
 // มอเตอร์สั่น (DRV8833)
@@ -95,6 +104,7 @@ constexpr unsigned long SHAKE_TIME_MS = 600;
 // ตั้ง false ถ้ายังไม่ได้ต่อเซ็นเซอร์ ระบบจะกลับไปหมุนตามจำนวนเม็ดที่สั่งแบบไม่ตรวจสอบ
 // และติดป้าย "unverified" ไว้ในบันทึก เพื่อไม่ให้ประวัติหลอกว่ายืนยันเม็ดจริง
 constexpr bool ENABLE_PILL_SENSOR = true;
+static_assert(!ENABLE_SERVO_MOVEMENT || ENABLE_PILL_SENSOR, "Real dispensing requires pill sensors");
 
 // GPIO34-39 เป็นขาอินพุตอย่างเดียวและ **ไม่มี pull-up ในตัวชิป**
 // โมดูล IR ต้องขับสัญญาณเองแบบ push-pull ไม่อย่างนั้นต้องใส่ pull-up ภายนอก 10k
@@ -186,7 +196,7 @@ static_assert(sizeof(SETUP_AP_PASSWORD) - 1 >= 8 && sizeof(SETUP_AP_PASSWORD) - 
 // การเชื่อมต่อกับ server (ตั้งค่า SERVER_BASE_URL และ DEVICE_API_KEY ใน secrets.h)
 // ---------------------------------------------------------------------------
 
-constexpr char FIRMWARE_VERSION[] = "1.1.0";
+constexpr char FIRMWARE_VERSION[] = "1.3.0";
 
 // รอบการดึงตารางยาเมื่อไม่มีคำสั่งค้าง (server อาจสั่งให้ถี่ขึ้นผ่าน next_poll_sec)
 constexpr unsigned long SYNC_INTERVAL_MS = 60UL * 1000UL;

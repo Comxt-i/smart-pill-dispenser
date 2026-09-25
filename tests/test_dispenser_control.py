@@ -16,15 +16,12 @@ class DispenserControlTest(unittest.TestCase):
         for enabled in (False, True):
             with self.subTest(movement_enabled=enabled), tempfile.TemporaryDirectory() as directory:
                 build = Path(directory)
-                for name in ("config.h", "dispenser_control.h", "dispenser_control.cpp"):
+                for name in ("config.h", "hardware_profile.h", "dispenser_control.h", "dispenser_control.cpp"):
                     shutil.copy(ROOT / "ESP32_Main" / name, build / name)
                 config = build / "config.h"
                 if enabled:
-                    original = config.read_text(encoding="utf-8")
-                    self.assertIn("ENABLE_SERVO_MOVEMENT = false;", original)
-                    config.write_text(original.replace(
-                        "ENABLE_SERVO_MOVEMENT = false;", "ENABLE_SERVO_MOVEMENT = true;"
-                    ), encoding="utf-8")
+                    (build / "hardware.local.h").write_text(
+                        "#define PILLBOX_REAL_HARDWARE true\n#define PILLBOX_CALIBRATED true\n")
                 executable = build / "controller_test"
                 subprocess.run([
                     compiler, "-std=c++11", "-Wall", "-Wextra", "-Werror",

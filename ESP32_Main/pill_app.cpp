@@ -4,6 +4,7 @@
 #include "buttons.h"
 #include "setup_button.h"
 #include "config.h"
+#include "command_journal.h"
 #include "dispenser_control.h"
 #include "event_queue.h"
 #include "net_sync.h"
@@ -33,6 +34,21 @@ char runningScheduleId[DISPENSER_COUNT][40] = {};
 // เก็บเป็น schedule_id ด้วยเหตุผลเดียวกับด้านบน
 char pendingDoseId[DISPENSER_COUNT][40] = {};
 uint8_t pendingDoseCount = 0;
+PendingEvent deferredEvents[MAX_PENDING_EVENTS];
+uint8_t deferredEventCount = 0;
+bool hasRunOwners() {
+  for (const auto owner : runOwner) if (owner != RunOwner::None) return true;
+  return false;
+}
+void persistEvent(PendingEvent &event) {
+  eventQueueMakeId(event.eventId, sizeof(event.eventId));
+  if (!eventQueuePush(event)) Serial.println("[events] queue full; oldest result dropped");
+}
+void persistDeferredEvents() {
+  if (dispenserIsBusy()) return;
+  for (uint8_t i = 0; i < deferredEventCount; ++i) persistEvent(deferredEvents[i]);
+  deferredEventCount = 0;
+}
 
 bool clockWasValid = false;
 bool firstTickAfterClock = true;
@@ -51,15 +67,24 @@ unsigned long noticeUntilMs = 0;
 void fillEvent(PendingEvent &event, const char *status)
 {
   memset(&event, 0, sizeof(event));
-  eventQueueMakeId(event.eventId, sizeof(event.eventId));
   strncpy(event.status, status, sizeof(event.status) - 1);
   event.localEpoch = rtcLocalEpoch();
 }
 
 void queueEvent(PendingEvent &event)
 {
-  if (!eventQueuePush(event))
-    Serial.println("[คิว] คิวผลการจ่ายยาเต็ม จำเป็นต้องทิ้งรายการเก่าสุด");
+  // Every event in simulation mode must stay distinguishable after upload.
+  if (!ENABLE_SERVO_MOVEMENT && DISPENSE_DRY_RUN && !strstr(event.note, "dry run")) {
+    char previous[sizeof(event.note)];
+    snprintf(previous, sizeof(previous), "%s", event.note);
+    snprintf(event.note, sizeof(event.note), "dry run%s%.22s", previous[0] ? ", " : "", previous);
+  }
+  if (deferredEventCount >= MAX_PENDING_EVENTS) stopDispenser();
+  if (dispenserIsBusy()) deferredEvents[deferredEventCount++] = event;
+  else {
+    persistDeferredEvents();
+    persistEvent(event);
+  }
 
   // ตั้งธงไว้ให้ appLoop ส่งในจังหวะของมันเอง
   //
@@ -143,19 +168,13 @@ void onDoseStateChanged(const DoseRef &ref, DoseState previous, DoseState next)
 /**
  * แปลงจำนวนเม็ดจากตารางยา (เป็นทศนิยมได้ เช่น 0.5 เม็ด) เป็นจำนวนเม็ดที่สั่งจ่ายจริง
  *
- * กลไกจ่ายได้ทีละเม็ดเต็มเท่านั้น จึงปัดขึ้น แล้วคุมไม่ให้เกินเพดาน
+ * กลไกจ่ายได้ทีละเม็ดเต็มเท่านั้น จำนวนที่ไม่รองรับต้องปฏิเสธ ห้ามปัดขึ้น
  */
 uint8_t pillsFor(float amount)
 {
-  if (amount <= 0)
-    return 1;
-
-  int pills = static_cast<int>(ceilf(amount));
-  if (pills < 1)
-    pills = 1;
-  if (pills > MAX_PILLS_PER_DOSE)
-    pills = MAX_PILLS_PER_DOSE;
-  return static_cast<uint8_t>(pills);
+  if (!isfinite(amount) || amount < 1 || amount > MAX_PILLS_PER_DOSE || floorf(amount) != amount)
+    return 0; // Controller rejects unsupported quantities before any motion.
+  return static_cast<uint8_t>(amount);
 }
 
 void showNotice(const char *text)
@@ -176,6 +195,7 @@ const char *describe(DispenseResult result)
     case DispenseResult::Busy: return "กำลังจ่ายยาอยู่";
     case DispenseResult::Cancelled: return "ปุ่ม Cancel ถูกกดค้างอยู่";
     case DispenseResult::ServoError: return "ต่อ Servo ไม่สำเร็จ";
+    case DispenseResult::SensorBlocked: return "เซ็นเซอร์ถูกบังอยู่ ตรวจช่องจ่ายยาก่อน";
   }
   return "ไม่ทราบผล";
 }
@@ -196,6 +216,7 @@ const char *reasonCode(DispenseResult result)
     case DispenseResult::Disabled: return "servo disabled";
     case DispenseResult::Busy: return "dispenser busy";
     case DispenseResult::Cancelled: return "cancel held";
+    case DispenseResult::SensorBlocked: return "sensor blocked";
     case DispenseResult::ServoError: return "servo attach failed";
   }
   return "unknown";
@@ -240,7 +261,8 @@ bool startDoseDispense(const DoseRef &ref)
     alertOneShot(AlertPattern::Warning);
     showNotice(result == DispenseResult::Disabled ? "SERVO DISABLED" : "DISPENSE FAILED");
 
-    // รายงาน FAILED เพียงครั้งเดียวต่อมื้อ ผู้ใช้ยังกดลองใหม่ได้จนหมดเวลาผ่อนผัน
+    dose->state = DoseState::Failed;
+    // Accepted doses require inspection before a new request, including start errors.
     if (!dose->failureReported)
     {
       dose->failureReported = true;
@@ -255,7 +277,7 @@ bool startDoseDispense(const DoseRef &ref)
   runOwner[index] = RunOwner::Dose;
   scheduleSetState(ref, DoseState::Dispensing);
   alertSet(AlertPattern::None);
-  lcdShowMessage(slot->name, "Dispensing...");
+  // No I2C operations while a motor is active.
   return true;
 }
 
@@ -274,6 +296,7 @@ void removePendingAt(uint8_t index)
  */
 void startPendingDoses()
 {
+  if (digitalRead(CANCEL_BUTTON_PIN) == LOW || wifiSetupActive()) return;
   for (uint8_t i = 0; i < pendingDoseCount;)
   {
     if (!dispenserHasCapacity())
@@ -283,11 +306,20 @@ void startPendingDoses()
     const Dose *dose = scheduleDoseAt(ref);
 
     // มื้อหายไปหลัง sync หรือเปลี่ยนสถานะไปแล้ว (เช่นผู้ใช้กดข้าม) -> ทิ้งจากคิว
-    const bool stillWaiting = dose && dose->state == DoseState::Alerting;
+    const bool stillWaiting = dose && dose->state == DoseState::Queued;
     if (stillWaiting && !startDoseDispense(ref))
       return;  // จานที่ต้องใช้ยังไม่ว่าง เก็บไว้ลองใหม่รอบหน้า
 
     removePendingAt(i);
+  }
+}
+
+void cancelPendingDoses() {
+  while (pendingDoseCount) {
+    const DoseRef ref = scheduleFindByScheduleId(pendingDoseId[0]);
+    Dose *dose = scheduleDoseAt(ref);
+    if (dose && dose->state == DoseState::Queued) scheduleSetState(ref, DoseState::Skipped);
+    removePendingAt(0);
   }
 }
 
@@ -298,6 +330,7 @@ void startPendingDoses()
  */
 void acceptRound()
 {
+  if (dispenserIsBusy() || pendingDoseCount || hasRunOwners()) return;
   DoseRef alerting[DISPENSER_COUNT];
   const uint8_t count = scheduleAlertingDoses(alerting, DISPENSER_COUNT);
   if (count == 0)
@@ -309,9 +342,24 @@ void acceptRound()
   pendingDoseCount = 0;
   for (uint8_t i = 0; i < count; ++i)
   {
-    const Dose *dose = scheduleDoseAt(alerting[i]);
-    if (!dose)
+    Dose *dose = scheduleDoseAt(alerting[i]);
+    const Slot *slot = scheduleSlotOf(alerting[i]);
+    if (!dose || !slot) continue;
+    if (!pillsFor(slot->amountPerDose)) {
+      dose->state = DoseState::Failed;
+      reportDose(alerting[i], "FAILED", "invalid parameters");
       continue;
+    }
+    if (ENABLE_SERVO_MOVEMENT) {
+      char key[72];
+      commandJournalDoseKey(key, sizeof(key), dose->scheduleId, rtcDayKey(), false);
+      if (!commandJournalReserve(key, rtcLocalEpoch())) {
+        dose->state = DoseState::Failed;
+        reportDose(alerting[i], "FAILED", "dose locked; check pills");
+        continue;
+      }
+    }
+    dose->state = DoseState::Queued;
     strncpy(pendingDoseId[pendingDoseCount], dose->scheduleId, sizeof(pendingDoseId[0]) - 1);
     pendingDoseId[pendingDoseCount][sizeof(pendingDoseId[0]) - 1] = '\0';
     ++pendingDoseCount;
@@ -367,6 +415,12 @@ uint8_t skipRound()
 void startCommandDispense(const RemoteCommand &command)
 {
   const DispenseResult result = dispenseMedicine(command.slot, pillsFor(command.amount));
+  if (result == DispenseResult::Disabled && DISPENSE_DRY_RUN) {
+    alertOneShot(AlertPattern::Success);
+    showNotice("DRY RUN OK");
+    reportCommand(command, "DISPENSED", "dry run");
+    return;
+  }
   if (result != DispenseResult::Started)
   {
     Serial.printf("[คำสั่ง] ช่อง %u ไม่สำเร็จ: %s\n", command.slot, describe(result));
@@ -378,7 +432,7 @@ void startCommandDispense(const RemoteCommand &command)
   const uint8_t index = static_cast<uint8_t>(command.slot - 1);
   runningCommand[index] = command;
   runOwner[index] = RunOwner::Command;
-  lcdShowMessage("From website", "Dispensing...");
+  // No I2C operations while a motor is active.
 }
 
 /**
@@ -393,10 +447,11 @@ void handleDispenseOutcome()
     return;
 
   const uint8_t index = static_cast<uint8_t>(outcome.dispenser - 1);
-  if (index >= DISPENSER_COUNT)
-    return;
-
-  const bool complete = !outcome.cancelled && outcome.dispensedPills >= outcome.requestedPills;
+  if (index >= DISPENSER_COUNT) return;
+  const bool complete = !outcome.cancelled && outcome.dispensedPills == outcome.requestedPills;
+  char failureNote[32];
+  snprintf(failureNote, sizeof(failureNote), "%s %u/%u; check pills",
+           outcome.cancelled ? "cancelled" : "count", outcome.dispensedPills, outcome.requestedPills);
   const RunOwner owner = runOwner[index];
   runOwner[index] = RunOwner::None;
 
@@ -446,12 +501,12 @@ void handleDispenseOutcome()
     {
       alertOneShot(AlertPattern::Warning);
       showNotice("DISPENSE STOPPED");
-      // กลับไปเตือนต่อเพื่อให้ผู้ใช้กดลองใหม่ได้ภายในเวลาผ่อนผัน
-      scheduleSetState(ref, DoseState::Alerting);
+      // A partial/uncertain dose must not be retried as another full dose.
+      dose->state = DoseState::Failed;
       if (!dose->failureReported)
       {
         dose->failureReported = true;
-        reportDose(ref, "FAILED", "not enough pills");
+        reportDose(ref, "FAILED", failureNote);
       }
     }
     return;
@@ -462,7 +517,7 @@ void handleDispenseOutcome()
     alertOneShot(complete ? AlertPattern::Success : AlertPattern::Warning);
     reportCommand(runningCommand[index],
                   complete ? "DISPENSED" : "FAILED",
-                  complete ? unverified : "not enough pills");
+                  complete ? unverified : failureNote);
   }
 }
 
@@ -479,7 +534,7 @@ void handleButtons()
   if (buttonPressed(ButtonId::Dispense))
     Serial.println("[Button] GPIO33 pressed; hold 3 seconds for Wi-Fi Setup");
   const auto action = setupButton.update(buttonHeld(ButtonId::Dispense), millis(),
-      !wifiSetupActive() && !dispenserIsBusy() && runOwner == RunOwner::None);
+      !wifiSetupActive() && !dispenserIsBusy() && !hasRunOwners() && pendingDoseCount == 0);
   if (action == SetupButtonAction::OpenSetup) {
     Serial.println("[Setup] GPIO33 held 3 seconds; requesting Wi-Fi Setup");
     if (!wifiStartSetup()) {
@@ -545,9 +600,7 @@ void handleButtons()
     cancelPressActive = false;
     stopDispenser();
 
-    // ต้องล้างคิวด้วย ไม่อย่างนั้นช่องที่รอจานว่างอยู่จะถูก startPendingDoses()
-    // สั่งออกตัวใหม่ทันทีในลูปถัดไป กลายเป็นหยุดไม่ได้จริง
-    pendingDoseCount = 0;
+    cancelPendingDoses();
 
     alertOneShot(AlertPattern::Warning);
     showNotice("STOPPED");
@@ -856,11 +909,19 @@ void appBegin()
 void appLoop()
 {
   buttonsUpdate();
-  wifiWebLoop();
   dispenserControlUpdate();
-  rtcLcdUpdate();
-
-  handleDispenseOutcome();
+  if (digitalRead(CANCEL_BUTTON_PIN) == LOW) cancelPendingDoses();
+  // Drain all simultaneously completed channels. Their events remain in RAM
+  // while another motor is active, keeping NVS/HTTP/I2C out of the sensing loop.
+  if (!dispenserIsBusy()) rtcLcdUpdate();
+  for (uint8_t i = 0; i < DISPENSER_COUNT; ++i) handleDispenseOutcome();
+  if (dispenserIsBusy() || pendingDoseCount) {
+    handleButtons();
+    startPendingDoses();
+    if (dispenserIsBusy() || pendingDoseCount) { alertUpdate(); return; }
+  }
+  persistDeferredEvents();
+  wifiWebLoop();
 
   if (!wifiSetupActive())
   {
@@ -885,6 +946,8 @@ void appLoop()
     return;
   }
 
+  // A short button press above may have started motion in this same iteration.
+  if (dispenserIsBusy()) { alertUpdate(); return; }
   // Keep reading the hold gesture promptly; defer network work until release.
   if (!buttonHeld(ButtonId::Dispense))
   {
@@ -922,6 +985,7 @@ void appLoop()
       else if (strcmp(command.type, "CANCEL") == 0)
       {
         stopDispenser();
+        cancelPendingDoses();
         reportCommand(command, "ACK", "cancel");
       }
       else
@@ -933,6 +997,7 @@ void appLoop()
     }
   }
 
+  if (dispenserIsBusy()) { alertUpdate(); return; }
   updateBuzzer();
   alertUpdate();
   updateDisplay();
@@ -985,6 +1050,8 @@ void appStatusJson(String &out)
   out += "\"ip\":\"" + (online ? WiFi.localIP().toString() : String("-")) + "\",";
   out += "\"rssi\":" + String(online ? WiFi.RSSI() : 0) + ",";
   out += "\"clock_valid\":" + String(rtcIsValid() ? "true" : "false") + ",";
+  out += "\"clock_source\":\"" + String(rtcClockSource()) + "\",";
+  out += "\"dry_run\":" + String(!ENABLE_SERVO_MOVEMENT && DISPENSE_DRY_RUN ? "true" : "false") + ",";
   out += "\"minutes_of_day\":" + String(rtcMinutesOfDay()) + ",";
   out += "\"servo_movement_enabled\":" + String(ENABLE_SERVO_MOVEMENT ? "true" : "false") + ",";
   out += "\"dispenser_busy\":" + String(dispenserIsBusy() ? "true" : "false") + ",";
