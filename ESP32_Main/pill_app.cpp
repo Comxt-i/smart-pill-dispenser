@@ -9,6 +9,7 @@
 #include "net_sync.h"
 #include "rtc_lcd.h"
 #include "schedule_store.h"
+#include "status_led.h"
 #include "wifi_web.h"
 
 #include <WiFi.h>
@@ -428,6 +429,7 @@ void handleDispenseOutcome()
     if (complete)
     {
       alertOneShot(AlertPattern::Success);
+      statusLedFlash(LedColor::Green);
       showNotice("TAKE YOUR PILLS");
       if (unverified)
       {
@@ -445,6 +447,7 @@ void handleDispenseOutcome()
     else
     {
       alertOneShot(AlertPattern::Warning);
+      statusLedFlash(LedColor::Red);
       showNotice("DISPENSE STOPPED");
       // กลับไปเตือนต่อเพื่อให้ผู้ใช้กดลองใหม่ได้ภายในเวลาผ่อนผัน
       scheduleSetState(ref, DoseState::Alerting);
@@ -479,7 +482,7 @@ void handleButtons()
   if (buttonPressed(ButtonId::Dispense))
     Serial.println("[Button] GPIO33 pressed; hold 3 seconds for Wi-Fi Setup");
   const auto action = setupButton.update(buttonHeld(ButtonId::Dispense), millis(),
-      !wifiSetupActive() && !dispenserIsBusy() && runOwner == RunOwner::None);
+      !wifiSetupActive() && !dispenserIsBusy() && pendingDoseCount == 0);
   if (action == SetupButtonAction::OpenSetup) {
     Serial.println("[Setup] GPIO33 held 3 seconds; requesting Wi-Fi Setup");
     if (!wifiStartSetup()) {
@@ -497,11 +500,13 @@ void handleButtons()
     if (alerting)
     {
       alertOneShot(AlertPattern::Click);
+      statusLedFlash(LedColor::Green);
       acceptRound();
     }
     else
     {
       alertOneShot(AlertPattern::Warning);
+      statusLedFlash(LedColor::Red);
       showNotice(dispenserIsBusy() ? "BUSY" : "NO DOSE DUE");
     }
   }
@@ -511,6 +516,7 @@ void handleButtons()
     if (alerting)
     {
       // ปุ่มเหลือง: ยังไม่สะดวกตอนนี้ ขอเลื่อนทั้งรอบไปอีก SNOOZE_MINUTES นาที
+      statusLedFlash(LedColor::Yellow);
       if (snoozeRound())
       {
         alertOneShot(AlertPattern::Click);
@@ -522,6 +528,7 @@ void handleButtons()
       {
         // เลื่อนครบโควตาแล้ว หรือเลื่อนต่อจะเลยเวลาผ่อนผัน
         alertOneShot(AlertPattern::Warning);
+        statusLedFlash(LedColor::Red);
         showNotice("CANNOT SNOOZE");
       }
     }
@@ -550,6 +557,7 @@ void handleButtons()
     pendingDoseCount = 0;
 
     alertOneShot(AlertPattern::Warning);
+    statusLedFlash(LedColor::Red);
     showNotice("STOPPED");
   }
 
@@ -560,6 +568,7 @@ void handleButtons()
     {
       // ปุ่มแดงกดสั้น: ข้ามทั้งรอบ ให้สอดคล้องกับปุ่มเขียวที่รับทั้งรอบ
       alertOneShot(AlertPattern::Click);
+      statusLedFlash(LedColor::Red);
       showNotice("SKIPPED");
       skipRound();
     }
@@ -688,6 +697,25 @@ uint8_t buildRoundLines(int roundMinutes,
   }
 
   return used;
+}
+
+/**
+ * เลือกรูปแบบไฟสถานะจากสิ่งที่เครื่องกำลังทำอยู่
+ *
+ * กำลังจ่าย (รวมช่องที่ยังรอคิว) สำคัญกว่าการเตือน เพราะผู้ใช้กดรับไปแล้ว
+ * และต้องเห็นว่าเครื่องยังทำงานอยู่ อย่าเพิ่งเดินหนี
+ */
+void updateStatusLed()
+{
+  if (dispenserIsBusy() || pendingDoseCount > 0)
+    statusLedSet(LedPattern::DispenseChase);
+  else if (scheduleDoseAt(activeAlert) &&
+           scheduleDoseAt(activeAlert)->state == DoseState::Alerting)
+    statusLedSet(LedPattern::AlertBlink);
+  else
+    statusLedSet(LedPattern::Off);
+
+  statusLedUpdate();
 }
 
 /**
@@ -843,6 +871,7 @@ void appBegin()
 {
   buttonsBegin();
   alertBegin();
+  statusLedBegin();
   eventQueueBegin();
   scheduleBegin(onDoseStateChanged);
 
@@ -880,6 +909,8 @@ void appLoop()
   {
     alertSet(AlertPattern::None);
     alertUpdate();
+    statusLedFlash(LedColor::Green);  // ค้างเขียวไว้ตลอดที่อยู่ในโหมดตั้งค่า
+    statusLedUpdate();
     showSetupScreen();
     lcdMedicineTick();
     return;
@@ -935,6 +966,7 @@ void appLoop()
 
   updateBuzzer();
   alertUpdate();
+  updateStatusLed();
   updateDisplay();
   lcdMedicineTick();  // ขยับข้อความเลื่อนและสลับบรรทัดล่าง
 }

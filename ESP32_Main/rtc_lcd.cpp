@@ -16,6 +16,24 @@ bool clockValid = false;
 bool timeLcdPresent = false, medicineLcdPresent = false, rtcPresent = false;
 unsigned long lastRefreshMs = 0;
 
+// นาฬิกาสำรองในซอฟต์แวร์ ใช้เมื่อไม่พบ DS1307
+//
+// ถ้าไม่มีตัวนี้ เครื่องที่ชิปนาฬิกาเสียจะค้างที่ "Clock not set" ตลอดไป
+// ทั้งที่ server ส่งเวลามาให้ทุกรอบ sync อยู่แล้ว ซึ่งทำให้กล่องใช้งานไม่ได้เลย
+//
+// ข้อเสียที่ยอมรับ: ไม่มีถ่านสำรอง เวลาหายทุกครั้งที่ไฟดับ
+// กล่องจะไม่รู้เวลาจนกว่าจะ sync กับ server สำเร็จครั้งแรกหลังเปิดเครื่อง
+uint32_t softEpoch = 0;          // เวลาที่ได้รับมาครั้งล่าสุด (0 = ยังไม่เคยได้)
+unsigned long softEpochSetMs = 0;  // millis() ตอนที่รับค่านั้นมา
+
+/** เวลาปัจจุบันตามนาฬิกาสำรอง หรือ 0 ถ้ายังไม่เคยตั้ง */
+uint32_t softEpochNow()
+{
+  if (softEpoch == 0)
+    return 0;
+  return softEpoch + (millis() - softEpochSetMs) / 1000UL;
+}
+
 // จำข้อความที่แสดงอยู่จริงของแต่ละบรรทัด เพื่อเขียนเฉพาะบรรทัดที่เปลี่ยน
 // การเขียนทับทุกบรรทัดทุกรอบทำให้จอกะพริบและกินเวลาบัส I2C โดยเปล่าประโยชน์
 char shownMedicine[LCD_MEDICINE_ROWS][LCD_MAX_COLS + 1] = {};
@@ -232,16 +250,30 @@ void rtcLcdUpdate()
 
   lastRefreshMs = millis();
 
-  if (!rtcPresent || !RTC.read(currentTime))
-  {
-    clockValid = false;
-    writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], "RTC ERROR");
-    writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], "Check DS1307");
-    return;
-  }
+  const bool chipRead = rtcPresent && RTC.read(currentTime);
 
-  // DS1307 ที่ยังไม่เคยตั้งเวลาจะรายงานปี 1970 ซึ่งใช้ตัดสินมื้อยาไม่ได้
-  clockValid = tmYearToCalendar(currentTime.Year) >= 2024;
+  if (!chipRead)
+  {
+    // ไม่มีชิปนาฬิกา แต่ถ้า server เคยบอกเวลามาแล้วก็เดินต่อด้วยนาฬิกาสำรองได้
+    // สำคัญมาก: ถ้า return ทิ้งตรงนี้ clockValid จะเป็น false ตลอดกาล
+    // แล้วทั้งเครื่องจะค้างที่หน้า "Clock not set" ใช้จ่ายยาไม่ได้เลย
+    const uint32_t epoch = softEpochNow();
+    if (epoch == 0)
+    {
+      clockValid = false;
+      writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], "RTC ERROR");
+      writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], "Wait for sync");
+      return;
+    }
+
+    breakTime(static_cast<time_t>(epoch), currentTime);
+    clockValid = true;
+  }
+  else
+  {
+    // DS1307 ที่ยังไม่เคยตั้งเวลาจะรายงานปี 1970 ซึ่งใช้ตัดสินมื้อยาไม่ได้
+    clockValid = tmYearToCalendar(currentTime.Year) >= 2024;
+  }
 
   char line1[17];
   char line2[17];
@@ -257,7 +289,7 @@ void rtcLcdUpdate()
            currentTime.Hour,
            currentTime.Minute,
            currentTime.Second,
-           clockValid ? "" : "  NOT SET");
+           chipRead ? (clockValid ? "" : "  NOT SET") : "  NO BAT");
 
   writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], clockValid ? line1 : "SET CLOCK FIRST");
   writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], line2);
@@ -265,8 +297,24 @@ void rtcLcdUpdate()
 
 void rtcSyncFromEpoch(uint32_t localEpoch)
 {
-  if (!rtcPresent || localEpoch == 0)
+  if (localEpoch == 0)
     return;
+
+  // เก็บไว้ในนาฬิกาสำรองเสมอ ไม่ว่าจะมีชิปหรือไม่
+  // ถ้าชิปหลุดไปกลางทาง (สายหลวม ไฟตก) เครื่องจะยังเดินเวลาต่อได้ด้วยค่านี้
+  softEpoch = localEpoch;
+  softEpochSetMs = millis();
+
+  if (!rtcPresent)
+  {
+    clockValid = true;
+    breakTime(static_cast<time_t>(localEpoch), currentTime);
+    Serial.printf("[RTC] ไม่มี DS1307 ใช้นาฬิกาสำรองตาม server: %02d:%02d:%02d\n",
+                  currentTime.Hour,
+                  currentTime.Minute,
+                  currentTime.Second);
+    return;
+  }
 
   // เขียน RTC เฉพาะตอนที่เพี้ยนจริง การเขียนทุกนาทีทำให้ EEPROM/บัสทำงานโดยไม่จำเป็น
   const uint32_t current = rtcLocalEpoch();

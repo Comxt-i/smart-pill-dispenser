@@ -20,7 +20,11 @@ DNSServer dns;
 Preferences storage;
 bool storageReady = false, setupActive = false, wasConnected = false;
 bool connecting = false, startPending = false, completed = false;
+// รหัส Wi-Fi ถูกเขียนลง NVS แล้วหรือยังในรอบตั้งค่านี้
+// แยกจากการจับคู่บัญชี เพราะต่อเน็ตติดกับจับคู่สำเร็จเป็นคนละเรื่องกัน
+bool candidateSaved = false;
 bool bootSetupRequested = false;
+uint32_t reconnectAttempts = 0;
 unsigned long attemptAt = 0, nextClaimAt = 0, closeAt = 0, lastReconnectMs = 0;
 constexpr unsigned long CONNECT_TIMEOUT_MS = 30000, RECONNECT_MS = 10000;
 constexpr uint32_t WIFI_MAGIC = 0x50425731;
@@ -47,7 +51,8 @@ bool setupIdentity()
       reinterpret_cast<const unsigned char *>(purpose), strlen(purpose), digest) != 0) return false;
   // ย่อให้พอดีจอ 20 คอลัมน์ (PillBox_ + 6 = 14 ตัวอักษร) ผู้ใช้จะได้อ่านนิ่งๆ ไม่ต้องรอข้อความเลื่อน
   snprintf(setupSsid, sizeof(setupSsid), "PillBox_%02X%02X%02X", digest[0], digest[1], digest[2]);
-  for (int i = 0; i < 8; i++) snprintf(setupPassword + i * 2, 3, "%02x", digest[3 + i]);
+  for (uint8_t i = 0; i < SETUP_AP_PASSWORD_BYTES; i++)
+    snprintf(setupPassword + i * 2, 3, "%02x", digest[3 + i]);
   return true;
 }
 
@@ -69,6 +74,16 @@ bool requirePortal()
   if (setupActive && server.client().localIP() == WiFi.softAPIP()) return true;
   server.send(403, "text/plain", "Setup mode required");
   return false;
+}
+
+/** แปลรหัสสถานะของ Wi-Fi เป็นเหตุผลที่คนอ่านแล้วรู้ว่าต้องไปแก้อะไร */
+const char *wifiStatusText(int status)
+{
+  if (status == WL_NO_SSID_AVAIL) return "หาชื่อเครือข่ายไม่เจอ (สะกดผิด หรือเป็น 5GHz)";
+  if (status == WL_CONNECT_FAILED) return "เจอเครือข่ายแต่เข้าไม่ได้ (รหัสผ่านผิด)";
+  if (status == WL_DISCONNECTED) return "ยังเชื่อมไม่สำเร็จ";
+  if (status == WL_CONNECTED) return "เชื่อมแล้ว";
+  return "กำลังพยายามอยู่";
 }
 
 void startSetup()
@@ -198,8 +213,17 @@ void wifiWebBegin()
     } else server.send(404, "text/plain", "Not found");
   });
   server.begin();
-  if (saved.magic == WIFI_MAGIC && !bootSetupRequested) WiFi.begin(saved.ssid, saved.password);
-  if (bootSetupRequested || saved.magic != WIFI_MAGIC) startSetup();
+  if (saved.magic == WIFI_MAGIC && !bootSetupRequested)
+  {
+    Serial.printf("[Wi-Fi] กำลังเชื่อมกับ \"%s\" ที่บันทึกไว้\n", saved.ssid);
+    WiFi.begin(saved.ssid, saved.password);
+  }
+  if (bootSetupRequested || saved.magic != WIFI_MAGIC)
+  {
+    if (!bootSetupRequested)
+      Serial.println("[Wi-Fi] ยังไม่เคยตั้งค่า Wi-Fi จึงเปิดโหมดตั้งค่าแทนการเชื่อมต่อ");
+    startSetup();
+  }
   lastReconnectMs = millis();
 }
 
@@ -210,12 +234,30 @@ void wifiWebLoop()
   if (setupActive) dns.processNextRequest();
   if (startPending) {
     if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) return;
-    startPending = false; connecting = true; attemptAt = now; nextClaimAt = now;
+    startPending = false; connecting = true; candidateSaved = false; attemptAt = now; nextClaimAt = now;
     WiFi.scanDelete(); WiFi.disconnect(); WiFi.begin(candidate.ssid, candidate.password);
     return;
   }
   const bool connected = WiFi.status() == WL_CONNECTED;
   if (connecting) {
+    // กล่องที่ยังไม่เคยตั้งค่า: บันทึกทันทีที่ต่อ Wi-Fi ติด ไม่ต้องรอผลจับคู่บัญชี
+    //
+    // เดิมบันทึกเฉพาะตอน netSyncCompleteSetup() ตอบ 200 ซึ่งแปลว่าถ้าเน็ตบ้านใช้ได้
+    // แต่เซิร์ฟเวอร์ล่มหรือรหัสตั้งค่าหมดอายุ กล่องจะลืม Wi-Fi ทั้งที่ต่อติดแล้ว
+    // ผู้ใช้ต้องตั้งใหม่ทุกครั้งที่เปิดเครื่อง ทำให้กล่องใช้ไม่ได้เวลาเซิร์ฟเวอร์มีปัญหา
+    //
+    // แต่ถ้ามีค่าเดิมอยู่แล้ว จะ **ไม่** เขียนทับตรงนี้ ต้องผ่านการจับคู่ (code == 200) เท่านั้น
+    // กันคนที่เข้าหน้าตั้งค่าได้ย้ายกล่องไปเครือข่ายอื่นอย่างถาวรโดยไม่มีรหัสจับคู่ที่ถูกต้อง
+    const bool firstTimeSetup = saved.magic != WIFI_MAGIC;
+    if (connected && !candidateSaved && storageReady && firstTimeSetup) {
+      if (storage.putBytes("config", &candidate, sizeof(candidate)) == sizeof(candidate)) {
+        saved = candidate; candidateSaved = true;
+        Serial.printf("[Wi-Fi] บันทึก \"%s\" ลงหน่วยความจำแล้ว\n", saved.ssid);
+      } else {
+        Serial.println("[Wi-Fi] เขียนค่าลง NVS ไม่สำเร็จ จะลืมค่านี้เมื่อรีเซ็ต");
+      }
+    }
+
     if (!connected && now - attemptAt >= CONNECT_TIMEOUT_MS) {
       connecting = false; WiFi.disconnect();
       memset(candidate.password, 0, sizeof(candidate.password)); memset(setupToken, 0, sizeof(setupToken));
@@ -225,7 +267,8 @@ void wifiWebLoop()
       const int code = netSyncCompleteSetup(setupToken);
       nextClaimAt = millis() + 10000;
       if (code == 200) {
-        // Persist only after both Wi-Fi association and account authorization succeed.
+        // จับคู่ผ่านแล้ว จึงมีสิทธิ์เขียนทับค่าเดิมได้
+        // เป็นทางเดียวที่กล่องซึ่งตั้งค่าไว้แล้วจะเปลี่ยน Wi-Fi ได้
         if (storage.putBytes("config", &candidate, sizeof(candidate)) != sizeof(candidate)) {
           message = "บันทึก Wi-Fi ไม่สำเร็จ กรุณาลองใหม่"; connecting = false;
         } else {
@@ -247,9 +290,26 @@ void wifiWebLoop()
     netSyncRequestNow(); completed = false;
   }
   if (!setupActive && !connected && saved.magic == WIFI_MAGIC && now - lastReconnectMs >= RECONNECT_MS) {
-    lastReconnectMs = now; WiFi.disconnect(); WiFi.begin(saved.ssid, saved.password);
+    lastReconnectMs = now;
+    ++reconnectAttempts;
+    // ต้องรายงานทุกครั้ง ไม่อย่างนั้นเวลาเชื่อมไม่ได้จะเงียบสนิทจนดูเหมือนเครื่องไม่ได้พยายาม
+    Serial.printf("[Wi-Fi] เชื่อม %s ไม่สำเร็จ: %s (ลองใหม่ครั้งที่ %lu)\n",
+                  saved.ssid,
+                  wifiStatusText(WiFi.status()),
+                  static_cast<unsigned long>(reconnectAttempts));
+    WiFi.disconnect();
+    WiFi.begin(saved.ssid, saved.password);
   }
-  if (connected && !wasConnected) Serial.println("[Wi-Fi] Connected");
+  if (connected && !wasConnected)
+  {
+    reconnectAttempts = 0;
+    Serial.print("[Wi-Fi] เชื่อมสำเร็จ IP = ");
+    Serial.println(WiFi.localIP());
+  }
+  else if (!connected && wasConnected)
+  {
+    Serial.println("[Wi-Fi] หลุดการเชื่อมต่อ กำลังลองใหม่");
+  }
   wasConnected = connected;
 }
 

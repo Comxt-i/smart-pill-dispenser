@@ -44,7 +44,7 @@ constexpr uint8_t DISPENSER_COUNT = 3;
 constexpr uint8_t SERVO_PINS[DISPENSER_COUNT] = {18, 19, 23};
 
 // Keep motion disabled until calibrated without pills.
-constexpr bool ENABLE_SERVO_MOVEMENT = false;
+constexpr bool ENABLE_SERVO_MOVEMENT = true;
 
 /**
  * โหมดทดสอบระบบทั้งวงจรโดยที่ยังไม่ได้ต่อ Servo
@@ -57,7 +57,7 @@ constexpr bool ENABLE_SERVO_MOVEMENT = false;
  *
  * ต้องตั้งกลับเป็น false เมื่อต่อ Servo แล้ว
  */
-constexpr bool DISPENSE_DRY_RUN = true;
+constexpr bool DISPENSE_DRY_RUN = false;
 constexpr int SERVO_MIN_PULSE_US = 1000;
 constexpr int SERVO_MAX_PULSE_US = 2000;
 constexpr int REST_PULSE_US[DISPENSER_COUNT] = {1500, 1500, 1500};
@@ -72,8 +72,13 @@ constexpr unsigned long MOVE_TIME_MS = 700;
 // DRV8833 หนึ่งบอร์ดมี 2 ช่อง จึงต้องใช้ **สองบอร์ด** สำหรับสามจาน
 // ขา SLP/nSLEEP ของทุกบอร์ดต้องเป็น HIGH และ GND ต้องต่อร่วมกับ ESP32
 //
-// GPIO14 ปล่อยพัลส์สั้นๆ ออกมาตอนบูตตามปกติของชิป มอเตอร์จาน 3 จึงอาจกระตุกหนึ่งครั้ง
-// ตอนเปิดเครื่อง ไม่เป็นอันตราย ถ้ารำคาญให้ย้ายไปขาอื่นที่ว่าง
+// GPIO14 ปล่อยสัญญาณคล็อกออกมาเองตอนบูตตามปกติของชิป
+// กับ DRV8833 นั่นแปลว่า IN2=HIGH ขณะที่ IN1 ยังลอย = มอเตอร์จาน 3 วิ่งเต็มกำลัง
+// และจะวิ่งค้างจนกว่าจะมีคนเขียนขาให้เป็น LOW จึงต้องเรียก dispenserSafePinsEarly()
+// เป็นคำสั่งแรกสุดของ setup() ห้ามย้ายไปไว้ทีหลัง
+//
+// ถ้าอยากตัดปัญหาถาวร: ถอดสาย GPIO14 ออกแล้วต่อขา IN2 ของจาน 3 ลง GND แทน
+// จะเสียแค่การเบรกมอเตอร์ตอนหมุนกลับ ซึ่งปล่อยให้หมุนฟรีก็ได้ ไม่กระทบการจ่ายยา
 constexpr uint8_t VIB_PWM_PINS[DISPENSER_COUNT] = {13, 26, 4};
 constexpr uint8_t VIB_DIR_PINS[DISPENSER_COUNT] = {16, 17, 14};
 
@@ -94,7 +99,7 @@ constexpr unsigned long SHAKE_TIME_MS = 600;
 //
 // ตั้ง false ถ้ายังไม่ได้ต่อเซ็นเซอร์ ระบบจะกลับไปหมุนตามจำนวนเม็ดที่สั่งแบบไม่ตรวจสอบ
 // และติดป้าย "unverified" ไว้ในบันทึก เพื่อไม่ให้ประวัติหลอกว่ายืนยันเม็ดจริง
-constexpr bool ENABLE_PILL_SENSOR = true;
+constexpr bool ENABLE_PILL_SENSOR = false;
 
 // GPIO34-39 เป็นขาอินพุตอย่างเดียวและ **ไม่มี pull-up ในตัวชิป**
 // โมดูล IR ต้องขับสัญญาณเองแบบ push-pull ไม่อย่างนั้นต้องใส่ pull-up ภายนอก 10k
@@ -145,7 +150,50 @@ static_assert(MAX_CONCURRENT_DISPENSERS * PEAK_MA_PER_DISPENSER <=
 // ชุดแรกจะผ่านช่วงกระแสพุ่งไปก่อนแล้วชุดที่สองจึงเริ่ม
 constexpr unsigned long DISPENSE_STAGGER_MS = 250;
 
-constexpr uint8_t BUZZER_PIN = 25;
+// ขา IN ของ buzzer เป็นอินพุตความต้านทานสูง จึงอยู่บน strapping pin ได้
+// (ต่างจาก LED ที่ต่อลง GND แล้วหนีบแรงดันขาจนบูตไม่ขึ้น)
+// ย้ายมาจาก GPIO25 เพื่อเปิดทางให้ไฟสถานะสีแดง
+//
+// GPIO15 มี pull-up ในตัวตอนบูต buzzer จึงอาจร้องสั้นๆ หนึ่งครั้งก่อน setup() รัน
+constexpr uint8_t BUZZER_PIN = 15;
+
+// ---------------------------------------------------------------------------
+// โมดูลไฟสถานะ 3 ดวง แดง/เหลือง/เขียว (common cathode: ขา G Y R GND)
+// ---------------------------------------------------------------------------
+//
+// ต่อ GND ของโมดูลเข้า GND ร่วม ส่วนอีกสามขาเข้า GPIO ตรงๆ
+// โมดูลส่วนใหญ่มีตัวต้านทานจำกัดกระแสมาให้บนบอร์ดแล้ว ถ้าไม่มีต้องใส่เอง 220-330 โอห์ม
+//
+// ตั้ง false เมื่อยังไม่ได้ต่อโมดูล หรือโมดูลเสีย
+// โค้ดจะไม่แตะขาทั้งสามเลย GPIO2 จึงกลับไปเป็นไฟบนบอร์ดตามปกติ ส่วน 25 กับ 5 ว่างให้ใช้อย่างอื่น
+constexpr bool ENABLE_STATUS_LED = true;
+
+// ***ห้ามใช้ GPIO12 เด็ดขาด***
+//
+// GPIO12 (MTDI) เป็นตัวเลือกแรงดันแฟลชตอนรีเซ็ต: LOW = 3.3V, HIGH = 1.8V
+// ถ้าเป็น HIGH ตอนบูต ชิปจะอ่านแฟลชไม่ออกแล้ววนบูตไม่จบ โดยขึ้น
+//   rst:0x10 (RTCWDT_RTC_RESET) / invalid header: 0xffffffff
+// ต่อให้คิดว่า LED จะดึงขาให้ต่ำเอง ก็ไม่ควรเสี่ยงกับขาที่พังแล้วพังทั้งบอร์ด
+//
+// GPIO5 ปล่อยพัลส์สั้นๆ ตอนบูตเหมือนกัน ไฟเขียวจึงอาจกะพริบหนึ่งครั้งตอนเปิดเครื่อง
+// แต่ไม่กระทบการบูต เพราะ strapping ของมันคุมจังหวะ SDIO slave ซึ่งไม่ได้ใช้ตอนบูตจากแฟลช
+constexpr uint8_t STATUS_LED_PINS[3] = {25, 2, 5};  // แดง, เหลือง, เขียว
+
+// false = common cathode (ขาร่วมลง GND, ขับขาสีเป็น HIGH เพื่อให้ติด) — พบบ่อยสุด
+// true  = common anode  (ขาร่วมเข้า 3.3V, ขับขาสีเป็น LOW เพื่อให้ติด)
+//
+// ถ้าต่อครบแล้วไฟไม่ติดเลยสักดวงทั้งที่ทดสอบด้วยการจั๊มไฟแล้วติด ให้สลับค่านี้
+constexpr bool STATUS_LED_ACTIVE_LOW = false;
+
+// ไฟเตือน: กระพริบพร้อมกันทุกดวง ติด/ดับอย่างละเท่านี้
+constexpr unsigned long STATUS_LED_BLINK_MS = 400;
+// ไฟตอนจ่ายยา: วิ่งไล่จากแดงไปเขียว เปลี่ยนดวงทุกเท่านี้
+constexpr unsigned long STATUS_LED_CHASE_MS = 180;
+// กดปุ่มแล้วโชว์สีนั้นค้างไว้นานเท่านี้ก่อนกลับไปแสดงสถานะปกติ
+constexpr unsigned long STATUS_LED_FLASH_MS = 600;
+
+// ตอนเปิดเครื่องไล่ไฟทีละดวงเพื่อพิสูจน์ว่าต่อครบ ดวงละกี่มิลลิวินาที
+constexpr unsigned long STATUS_LED_SELFTEST_MS = 200;
 // โมดูลปุ่ม 3 ตัว: จ่ายไฟ VCC ด้วย 3.3V เท่านั้น (5V จะทำให้ GPIO เสียหาย)
 // ทุกปุ่มเป็น active-LOW คือกดแล้วดึงขาลง GND
 constexpr uint8_t DISPENSE_BUTTON_PIN = 33;  // K3 ปุ่มเขียว = รับยา
@@ -181,6 +229,14 @@ static_assert(sizeof(SETUP_AP_SSID) - 1 >= 1 && sizeof(SETUP_AP_SSID) - 1 <= 31,
               "SETUP_AP_SSID ต้องยาว 1-31 ตัวอักษร");
 static_assert(sizeof(SETUP_AP_PASSWORD) - 1 >= 8 && sizeof(SETUP_AP_PASSWORD) - 1 <= 63,
               "SETUP_AP_PASSWORD ต้องยาว 8-63 ตัวอักษรตามข้อกำหนดของ WPA2");
+
+// ความยาวรหัสผ่านของ AP แบบคำนวณเอง นับเป็นไบต์ (ออกมาเป็น hex สองตัวอักษรต่อไบต์)
+//
+// 4 ไบต์ = 8 ตัวอักษร ซึ่งเป็นความยาวต่ำสุดที่ WPA2 ยอมรับพอดี
+// สั้นลงจากเดิม 16 ตัว เพื่อให้ผู้ใช้อ่านจากจอแล้วพิมพ์ตามได้โดยไม่ผิด
+constexpr uint8_t SETUP_AP_PASSWORD_BYTES = 4;
+static_assert(SETUP_AP_PASSWORD_BYTES * 2 >= 8 && SETUP_AP_PASSWORD_BYTES * 2 <= 63,
+              "รหัสผ่าน AP แบบคำนวณเองต้องยาว 8-63 ตัวอักษรตามข้อกำหนดของ WPA2");
 
 // ---------------------------------------------------------------------------
 // การเชื่อมต่อกับ server (ตั้งค่า SERVER_BASE_URL และ DEVICE_API_KEY ใน secrets.h)

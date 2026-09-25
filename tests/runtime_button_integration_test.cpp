@@ -29,6 +29,22 @@ uint32_t rtcLocalEpoch() { return 0; }
 int rtcMinutesOfDay() { return 0; }
 void eventQueueMakeId(char*, size_t) {}
 bool eventQueuePush(const PendingEvent&) { return true; }
+
+// ปุ่มทำงานกับ "ทั้งรอบ" แล้ว จึงต้องมีตัวไล่มื้อที่กำลังเตือนและตัวคุมคิวรายจาน
+DoseRef alertingRef = {0, 0, true};
+uint8_t scheduleAlertingDoses(DoseRef* out, uint8_t maxCount) {
+  if (!out || maxCount == 0 || testDose.state != DoseState::Alerting) return 0;
+  out[0] = alertingRef;
+  return 1;
+}
+bool scheduleCanSnooze(const DoseRef&, int) { return true; }
+DoseRef scheduleFindByScheduleId(const char*) { return alertingRef; }
+bool dispenserHasCapacity() { return !busy; }
+
+// ไฟสถานะไม่มีผลต่อพฤติกรรมของปุ่ม จึงกลืนทิ้งได้
+void statusLedFlash(LedColor) {}
+void statusLedSet(LedPattern) {}
+void statusLedUpdate() {}
 void tick(uint32_t ms) { nowMs += ms; buttonsUpdate(); handleButtons(); }
 void press(ButtonId id) {
   levels[BUTTON_PINS[static_cast<uint8_t>(id)]] = LOW;
@@ -41,7 +57,10 @@ void release(ButtonId id) {
 void resetCase() {
   for (int &level : levels) level = HIGH;
   buttonsBegin(); setupButton = {};
-  runOwner = RunOwner::None; cancelPressActive = false;
+  // runOwner เป็นอาร์เรย์รายจานแล้ว เพราะจ่ายพร้อมกันได้หลายจาน
+  for (RunOwner &owner : runOwner) owner = RunOwner::None;
+  pendingDoseCount = 0;
+  cancelPressActive = false;
   busy = inSetup = false;
   dispenseCalls = setupCalls = stopCalls = 0;
   testDose.state = DoseState::Alerting;

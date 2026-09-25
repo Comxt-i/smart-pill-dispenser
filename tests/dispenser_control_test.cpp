@@ -136,8 +136,18 @@ int main()
 
     if (!ENABLE_PILL_SENSOR)
     {
-      stopDispenser();
-      (void)takeDispenseOutcome(outcome);
+      // ไม่มีเซ็นเซอร์: หนึ่งรอบหมุน = หนึ่งเม็ด ต้องจบใน 1 รอบ ไม่ใช่วนจนครบเพดาน
+      advance(MOVE_TIME_MS);  // Releasing -> Returning
+      advance(MOVE_TIME_MS);  // Returning -> จบ
+
+      assert(!dispenserIsBusy());
+      assert(takeDispenseOutcome(outcome));
+      assert(outcome.dispenser == unit);
+      assert(outcome.attempts == 1);  // ห้ามวนซ้ำโดยไม่จำเป็น
+      assert(outcome.dispensedPills == 1 && outcome.requestedPills == 1);
+      assert(!outcome.cancelled);
+      assert(!outcome.sensorVerified);  // ต้องบอกว่ายืนยันด้วย IR ไม่ได้
+      assert(pulses.size() == 2);
       continue;
     }
 

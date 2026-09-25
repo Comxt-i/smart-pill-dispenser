@@ -19,6 +19,18 @@ struct DispenseOutcome {
   bool sensorVerified;     // true = นับจากเซ็นเซอร์ IR จริง
 };
 
+/**
+ * ดับมอเตอร์สั่นทั้งสามตัวทันที ต้องเป็นคำสั่งแรกสุดใน setup()
+ *
+ * GPIO14 (ขา DIR ของจาน 3) ปล่อยสัญญาณคล็อกออกมาเองตอนบูตตามปกติของชิป
+ * กับ DRV8833 นั่นแปลว่า IN2=HIGH ขณะที่ IN1 ยังลอยอยู่ = มอเตอร์วิ่งเต็มกำลัง
+ * และจะวิ่งไปเรื่อยๆ จนกว่าจะมีคนเขียนขานั้นให้เป็น LOW
+ *
+ * แยกออกมาจาก dispenserControlBegin() เพราะตัวนั้นอยู่ท้าย setup()
+ * กว่าจะถึงก็ผ่าน Serial, ปุ่มบูต และการสแกน I2C ไปแล้วเป็นวินาที
+ */
+void dispenserSafePinsEarly();
+
 void dispenserControlBegin();
 void dispenserControlUpdate();
 

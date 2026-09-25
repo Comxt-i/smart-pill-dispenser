@@ -256,6 +256,18 @@ void updateRun(uint8_t index, unsigned long now)
       if (elapsed < MOVE_TIME_MS)
         return;
 
+      // ไม่มีเซ็นเซอร์: นับหนึ่งเม็ดต่อหนึ่งรอบหมุน เพราะไม่มีอะไรยืนยันได้ดีกว่านี้
+      //
+      // ถ้าไม่นับตรงนี้ targetReached จะไม่มีวันเป็นจริง จานจะวนครบ MAX_ATTEMPTS_PER_DOSE
+      // ทุกครั้งที่จ่าย (ราว 16 วินาทีต่อหนึ่งเม็ด) แล้วค่อยจบแบบรายงานว่าสำเร็จ
+      if (!ENABLE_PILL_SENSOR)
+      {
+        if (run.countedPills < 255)
+          ++run.countedPills;
+        if (run.countedPills >= run.requestedPills)
+          run.targetReached = true;
+      }
+
       if (run.targetReached)
       {
         finishRun(index, false);
@@ -294,6 +306,21 @@ void updateRun(uint8_t index, unsigned long now)
 }
 
 }  // namespace
+
+void dispenserSafePinsEarly()
+{
+  for (uint8_t index = 0; index < DISPENSER_COUNT; ++index)
+  {
+    // ใช้ digitalWrite ไม่ใช่ analogWrite ตรงนี้ เพราะยังไม่ได้ผูกขาเข้ากับ LEDC
+    // และต้องการให้ขาเป็น LOW ภายในไม่กี่ไมโครวินาที ไม่ต้องรอ LEDC ตั้งค่าเสร็จ
+    //
+    // IN1 = IN2 = LOW คือสถานะ coast ของ DRV8833 มอเตอร์หยุดหมุนอิสระ
+    pinMode(VIB_DIR_PINS[index], OUTPUT);
+    digitalWrite(VIB_DIR_PINS[index], LOW);
+    pinMode(VIB_PWM_PINS[index], OUTPUT);
+    digitalWrite(VIB_PWM_PINS[index], LOW);
+  }
+}
 
 void dispenserControlBegin()
 {
@@ -412,6 +439,10 @@ bool takeDispenseOutcome(DispenseOutcome &outcome)
 
 bool pillSensorBlocked(uint8_t dispenser)
 {
+  // ปิดเซ็นเซอร์อยู่ = ขายังลอย การอ่านจะได้ค่าสุ่ม จึงตอบว่าไม่ถูกบังไปเลย
+  // ไม่อย่างนั้นหน้าเว็บวินิจฉัยจะโชว์ค่ามั่วให้เข้าใจผิดว่าเซ็นเซอร์ทำงานอยู่
+  if (!ENABLE_PILL_SENSOR)
+    return false;
   if (dispenser < 1 || dispenser > DISPENSER_COUNT)
     return false;
   return readSensor(static_cast<uint8_t>(dispenser - 1));
