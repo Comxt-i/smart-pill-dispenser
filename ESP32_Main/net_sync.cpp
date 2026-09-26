@@ -36,6 +36,8 @@ char configVersion[12] = "";
 char stateVersion[12] = "";
 // server รุ่นนี้มี /wait (ส่ง state_version มา) = รู้การเปลี่ยนทันที sync เต็มเป็นแค่ตาข่ายรองรับ
 bool waitSupported = false;
+// sync ครั้งแรกหลังเปิดเครื่องจบแล้ว (สำเร็จหรือไม่ก็ตาม) ใช้ตัดสินว่าจะหันไปใช้ตารางในเครื่องไหม
+bool firstSyncFinished = false;
 unsigned long nextWaitAtMs = 0;
 unsigned long waitBlockedUntilMs = 0;
 
@@ -554,6 +556,7 @@ void netSyncRequestNow()
 /** นำผล sync ไปใช้ รันใน loop หลักเท่านั้น (แก้ตารางยา นาฬิกา และคิวคำสั่ง) */
 static bool applySync(int code, const String &body)
 {
+  firstSyncFinished = true;
   if (code != 200)
   {
     describeFailure("sync", code);
@@ -775,6 +778,11 @@ static void applyWait(int code, const String &reply)
   }
   // อ่านไม่ออกว่าเปลี่ยนไหม ให้ถือว่าเปลี่ยน sync เกินหนึ่งรอบดีกว่าพลาดการแก้ไข
   onWaitAnswer(doc["changed"] | true);
+}
+
+bool netSyncFirstSyncFinished()
+{
+  return firstSyncFinished;
 }
 
 bool netSyncApplyCachedSchedule()

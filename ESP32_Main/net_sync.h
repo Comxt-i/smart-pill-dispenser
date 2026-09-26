@@ -49,6 +49,9 @@ void netSyncPump();
  */
 bool netSyncApplyCachedSchedule();
 
+/** sync ครั้งแรกหลังเปิดเครื่องได้คำตอบแล้ว (สำเร็จหรือล้มเหลว) */
+bool netSyncFirstSyncFinished();
+
 /** true เมื่อถึงรอบที่ควรเรียก netSyncFetch() (คุมจังหวะตาม next_poll_sec ของ server) */
 bool netSyncDue();
 

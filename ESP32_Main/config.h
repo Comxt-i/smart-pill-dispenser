@@ -304,6 +304,9 @@ constexpr unsigned long SYNC_INTERVAL_MS = 5UL * 1000UL;
 // ระหว่างถือสาย งานเครือข่ายอื่น (ส่งผลการจ่ายยา) ต้องรอ ค่านี้จึงเป็นเวลารอสูงสุดของงานนั้นด้วย
 // ต้องไม่เกิน 25 (เพดานของ server)
 constexpr unsigned long WAIT_TIMEOUT_SEC = 15;
+// เปิดเครื่องแล้วรอตารางจาก server นานสุดเท่านี้ ก่อนหันไปใช้ตารางที่เก็บไว้ในเครื่อง
+// (Wi-Fi ต่อติดปกติ 2-6 วินาที + TLS 1-3 วินาที) ถ้า server ตอบว่าล้มเหลวก่อน ใช้ของในเครื่องทันที
+constexpr unsigned long BOOT_SERVER_WAIT_MS = 20000;
 static_assert(WAIT_TIMEOUT_SEC >= 1 && WAIT_TIMEOUT_SEC <= 25, "server holds /wait for at most 25 s");
 // server แจ้งการเปลี่ยนเองได้แล้ว sync เต็มเป็นแค่ตาข่ายรองรับ ห่างได้ถึงเท่านี้
 constexpr unsigned long FULL_SYNC_MAX_MS = 10UL * 60UL * 1000UL;
@@ -345,7 +348,13 @@ constexpr uint8_t MAX_PILLS_PER_DOSE = 9;
 
 // ความยาวสูงสุดของข้อมูลที่เก็บในหน่วยความจำ
 constexpr uint8_t MAX_DOSES_PER_SLOT = 6;   // มื้อยาต่อช่องต่อวัน
-constexpr uint8_t MAX_PENDING_EVENTS = 12;  // ผลการจ่ายยาที่รอส่งเมื่อเน็ตหลุด (เก็บลง NVS)
+// ผลการจ่ายยาที่รอส่งตอนเน็ตหลุด เก็บในแฟลช ส่งให้ server เมื่อกลับมาออนไลน์
+//   มีพาร์ทิชันไฟล์ (ตาราง default ของ Arduino): 60 รายการ ราว 10 วันถ้ากินวันละ 6 มื้อ
+//   ไม่มี: 12 รายการใน NVS (มากกว่านี้ NVS จะเต็มจน Wi-Fi และบันทึกคำสั่งเขียนไม่ได้)
+// เต็มแล้วจะทิ้งรายการเก่าสุด (ขึ้นเตือนใน Serial)
+constexpr uint8_t MAX_PENDING_EVENTS = 12;
+constexpr uint8_t MAX_PENDING_EVENTS_FLASH = 60;
+static_assert(MAX_PENDING_EVENTS_FLASH >= MAX_PENDING_EVENTS, "flash must hold at least what NVS did");
 constexpr uint8_t MAX_PENDING_COMMANDS = 5; // คำสั่งจากเว็บที่รอทำ
 
 // ---------------------------------------------------------------------------
@@ -368,7 +377,7 @@ constexpr unsigned long ALERT_BEEP_PERIOD_MS = 5000;
 //   true  = ดังเมื่อขา IN เป็น HIGH (โมดูลที่ใช้ทรานซิสเตอร์ NPN ส่วนใหญ่)
 //   false = ดังเมื่อขา IN เป็น LOW  (โมดูล 3 ขาที่ใช้ PNP หลายรุ่น)
 // ตั้งผิดขั้วจะกลับด้าน: ร้องค้างตลอดเวลาที่ควรเงียบ และเงียบตอนที่ควรร้อง
-constexpr bool BUZZER_ACTIVE_HIGH = true;
+constexpr bool BUZZER_ACTIVE_HIGH = false;
 
 // ปิ๊บสั้นๆ หนึ่งครั้งตอนเปิดเครื่อง เพื่อให้รู้ทันทีว่า buzzer ต่อถูกขาและยังดังอยู่
 // ไม่ต้องรอให้ถึงเวลากินยาแล้วค่อยพบว่าเงียบ ตั้ง 0 เพื่อปิด

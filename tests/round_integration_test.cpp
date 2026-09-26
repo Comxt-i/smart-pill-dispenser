@@ -43,6 +43,8 @@ void eventQueueBegin() {}
 void netSyncBegin() {}
 void netSyncService() {}
 void netSyncPump() {}
+bool netSyncFirstSyncFinished() { return false; }
+bool flashStoreBegin() { return true; }
 bool netSyncApplyCachedSchedule() { return false; }
 void scheduleCacheBegin() {}
 // มื้อที่ถูกบันทึกลง NVS ว่า "จบแล้ววันนี้" (กันเตือน/จ่ายซ้ำหลังไฟดับ)

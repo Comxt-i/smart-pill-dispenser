@@ -1,5 +1,7 @@
 #include <esp_system.h>
 #include "schedule_cache.h"
+#include "boot_policy.h"
+#include "flash_store.h"
 #include "pill_app.h"
 
 #include "alert.h"
@@ -973,7 +975,11 @@ void updateDisplay()
   else
   {
     // ออฟไลน์ = ตารางอาจไม่ตรงกับที่ตั้งไว้บนเว็บ ผู้ใช้ควรรู้
-    snprintf(hintB, sizeof(hintB), "OFFLINE - no sync");
+    // มีผลการรับยาที่ยังไม่ได้ส่ง: บอกให้รู้ว่าเก็บไว้ครบ จะส่งเองเมื่อเน็ตกลับมา
+    if (eventQueueSize() > 0)
+      snprintf(hintB, sizeof(hintB), "OFFLINE %u UNSENT", static_cast<unsigned>(eventQueueSize()));
+    else
+      snprintf(hintB, sizeof(hintB), "OFFLINE - no sync");
     const char *hints[2] = {hintA, hintB};
     lcdSetMedicineScreen(lines, LCD_MEDICINE_ROWS, hints, 2);
   }
@@ -1064,6 +1070,8 @@ void appBegin()
   buttonsBegin();
   alertBegin();
   statusLedBegin();
+  // ก่อนโมดูลที่เก็บข้อมูลในแฟลช: คิวผลการจ่ายยาและตารางยาในเครื่องอยู่บนพาร์ทิชันไฟล์
+  flashStoreBegin();
   eventQueueBegin();
   scheduleBegin(onDoseStateChanged);
   scheduleCacheBegin();
@@ -1105,8 +1113,9 @@ void appLoop()
       netSyncRequestNow();
     }
     const bool clockValid = rtcIsValid();
-    // เปิดเครื่องมาแล้วนาฬิกาพร้อม แต่ยังไม่มีตารางจาก server: ใช้ของที่เก็บไว้ เตือนได้แม้เน็ตยังไม่มา
-    if (clockValid && !scheduleHasData() && !cachedScheduleTried) {
+    // เปิดเครื่อง: ถาม server ก่อน ได้คำตอบว่าล้มเหลว หรือรอนานเกินไป ค่อยใช้ตารางที่เก็บไว้ในเครื่อง
+    if (shouldUseCachedSchedule(clockValid, scheduleHasData(), cachedScheduleTried,
+                                netSyncFirstSyncFinished(), millis(), BOOT_SERVER_WAIT_MS)) {
       cachedScheduleTried = true;
       netSyncApplyCachedSchedule();
     }

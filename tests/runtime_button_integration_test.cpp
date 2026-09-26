@@ -57,6 +57,8 @@ const char *doseStateName(DoseState) { return ""; }
 void netSyncBegin() {}
 void netSyncService() {}
 void netSyncPump() {}
+bool netSyncFirstSyncFinished() { return false; }
+bool flashStoreBegin() { return true; }
 bool netSyncApplyCachedSchedule() { return false; }
 void scheduleCacheBegin() {}
 void scheduleCacheMarkClosed(const char*, uint32_t) {}
