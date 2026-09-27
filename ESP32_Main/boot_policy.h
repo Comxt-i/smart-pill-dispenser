@@ -1,4 +1,5 @@
 #pragma once
+#include <stdint.h>
 
 // เปิดเครื่องแล้วจะใช้ตารางยาที่เก็บไว้ในเครื่องเมื่อไร
 //
@@ -25,7 +26,8 @@ inline bool shouldUseCachedSchedule(bool clockValid,
  * ตารางยาบนเครื่องอาจเก่าแล้วไหม: sync สำเร็จครั้งล่าสุดนานเกิน staleMs
  * lastOkMs = 0 คือยังไม่เคยสำเร็จเลยตั้งแต่เปิดเครื่อง นับจากตอนเปิดเครื่องแทน
  */
-inline bool scheduleIsStale(unsigned long lastOkMs, unsigned long nowMs, unsigned long staleMs)
+inline bool scheduleIsStale(uint32_t lastOkMs, uint32_t nowMs, uint32_t staleMs)
 {
-  return lastOkMs == 0 ? nowMs >= staleMs : nowMs - lastOkMs >= staleMs;
+  // millis() วนรอบที่ 32 บิต ใช้ขนาดเดียวกันทั้งบน ESP32 และคอมพิวเตอร์ที่รันทดสอบ
+  return lastOkMs == 0 ? nowMs >= staleMs : uint32_t(nowMs - lastOkMs) >= staleMs;
 }
