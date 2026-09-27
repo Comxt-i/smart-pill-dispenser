@@ -249,7 +249,8 @@ const char *describe(DispenseResult result)
     case DispenseResult::Busy: return "กำลังจ่ายยาอยู่";
     case DispenseResult::Cancelled: return "ปุ่ม Cancel ถูกกดค้างอยู่";
     case DispenseResult::ServoError: return "ต่อ Servo ไม่สำเร็จ";
-    case DispenseResult::SensorBlocked: return "เซ็นเซอร์ถูกบังอยู่ ตรวจช่องจ่ายยาก่อน";
+    case DispenseResult::SensorBlocked: return "ตัวรับไม่เห็นแสงเลเซอร์ (มีของขวาง เล็งไม่ตรง หรือตัวรับไม่มีไฟ)";
+    case DispenseResult::LaserOff: return "สั่งเปิดเลเซอร์ไม่ได้ PCF8574 ไม่ตอบ ตรวจสาย I2C และไฟเลี้ยง";
   }
   return "ไม่ทราบผล";
 }
@@ -270,7 +271,8 @@ const char *reasonCode(DispenseResult result)
     case DispenseResult::Disabled: return "servo disabled";
     case DispenseResult::Busy: return "dispenser busy";
     case DispenseResult::Cancelled: return "cancel held";
-    case DispenseResult::SensorBlocked: return "sensor blocked";
+    case DispenseResult::SensorBlocked: return "no laser beam at sensor";  // ช่องบันทึกยาว 32 ตัว
+    case DispenseResult::LaserOff: return "laser switch no reply";
     case DispenseResult::ServoError: return "servo attach failed";
   }
   return "unknown";
@@ -282,6 +284,21 @@ const char *reasonCode(DispenseResult result)
  * คืน true เมื่อจัดการมื้อนี้เรียบร้อยแล้ว ไม่ว่าจะเริ่มหมุนได้หรือรายงานความล้มเหลวไปแล้ว
  * คืน false เฉพาะตอนที่ยังไม่มีจานว่าง ผู้เรียกต้องเก็บไว้ลองใหม่รอบถัดไป
  */
+/**
+ * จอยา (20x4) บอกว่ากำลังจ่ายยา ภาษาอังกฤษ (จอแสดงไทยไม่ได้)
+ *
+ * ต้องเรียกก่อนกลไกเริ่มขยับเท่านั้น: ระหว่างมอเตอร์ทำงาน loop ไม่แตะบัส I2C เลย
+ * จอจึงค้างหน้านี้ไว้ตลอดที่จานหมุน แล้วกลับเป็นหน้าปกติเองเมื่อจ่ายเสร็จ
+ * (เดิมไม่วาดอะไร จอค้างหน้าเดิม ผู้ใช้ไม่รู้ว่าเครื่องกำลังทำงาน)
+ */
+void showDispensingScreen(const char *detail1, const char *detail2)
+{
+  const char *lines[3] = {"DISPENSING PILLS", detail1 ? detail1 : "", detail2 ? detail2 : ""};
+  const char *hints[1] = {"PLEASE WAIT..."};
+  lcdSetMedicineScreen(lines, 3, hints, 1);
+  lcdMedicineTick();  // เขียนลงจอเดี๋ยวนี้ ก่อนมอเตอร์เริ่ม
+}
+
 bool startDoseDispense(const DoseRef &ref)
 {
   const Slot *slot = scheduleSlotOf(ref);
@@ -314,10 +331,21 @@ bool startDoseDispense(const DoseRef &ref)
   {
     Serial.printf("[จ่ายยา] ช่อง %u ไม่สำเร็จ: %s\n", slot->number, describe(result));
     alertOneShot(AlertPattern::Warning);
-    showNotice(result == DispenseResult::Disabled ? "SERVO DISABLED" : "DISPENSE FAILED");
+    showNotice(result == DispenseResult::Disabled      ? "SERVO DISABLED"
+               : result == DispenseResult::LaserOff      ? "LASER FAULT"
+               : result == DispenseResult::SensorBlocked ? "NO LASER BEAM"
+                                                         : "DISPENSE FAILED");
 
     dose->state = DoseState::Failed;
-    // Accepted doses require inspection before a new request, including start errors.
+    // ทุกผลที่ไม่ใช่ Started/Busy ถูกปฏิเสธก่อนกลไกขยับ (เซ็นเซอร์ใช้ไม่ได้ servo ไม่ตอบ กดยกเลิก)
+    // ยาไม่ได้ออกมาแน่นอน จึงปลดการจองของวันนี้ แก้ปัญหาแล้วกดรับมื้อนี้ใหม่ได้
+    // ถ้าไม่ปลด มื้อนี้จะติด "dose locked" ไปทั้งวันทั้งที่ไม่เคยจ่ายเลย
+    if (ENABLE_SERVO_MOVEMENT)
+    {
+      char key[72];
+      commandJournalDoseKey(key, sizeof(key), dose->scheduleId, rtcDayKey(), false);
+      commandJournalRelease(key);
+    }
     if (!dose->failureReported)
     {
       dose->failureReported = true;
@@ -395,6 +423,8 @@ void acceptRound()
   alertSet(AlertPattern::None);
 
   pendingDoseCount = 0;
+  char detail[2][LCD_MAX_COLS + 1] = {};
+  uint8_t details = 0;
   for (uint8_t i = 0; i < count; ++i)
   {
     Dose *dose = scheduleDoseAt(alerting[i]);
@@ -410,7 +440,11 @@ void acceptRound()
       commandJournalDoseKey(key, sizeof(key), dose->scheduleId, rtcDayKey(), false);
       if (!commandJournalReserve(key, rtcLocalEpoch())) {
         dose->state = DoseState::Failed;
-        reportDose(alerting[i], "FAILED", "dose locked; check pills");
+        // บอกเหตุจริงในบันทึก: "เริ่มจ่ายไปแล้ววันนี้" ต่างจาก "เขียนบันทึกไม่ได้" มาก คนดูแลต้องแก้คนละอย่าง
+        char note[32];
+        snprintf(note, sizeof(note), "locked: %s", commandJournalLastError());  // ช่องบันทึกยาว 32 ตัว
+        Serial.printf("[จ่ายยา] %s\n", note);
+        reportDose(alerting[i], "FAILED", note);
         continue;
       }
     }
@@ -418,8 +452,13 @@ void acceptRound()
     strncpy(pendingDoseId[pendingDoseCount], dose->scheduleId, sizeof(pendingDoseId[0]) - 1);
     pendingDoseId[pendingDoseCount][sizeof(pendingDoseId[0]) - 1] = '\0';
     ++pendingDoseCount;
+    if (details < 2)
+      snprintf(detail[details++], sizeof(detail[0]), "%.15s x%u", slot->name,
+               static_cast<unsigned>(pillsFor(slot->amountPerDose)));
   }
 
+  if (pendingDoseCount > 0)
+    showDispensingScreen(detail[0], details > 1 ? detail[1] : (pendingDoseCount > 2 ? "+ more" : ""));
   startPendingDoses();
 }
 
@@ -469,6 +508,10 @@ uint8_t skipRound()
 
 void startCommandDispense(const RemoteCommand &command)
 {
+  char detail[LCD_MAX_COLS + 1];
+  snprintf(detail, sizeof(detail), "SLOT %u x%u (WEB)", static_cast<unsigned>(command.slot),
+           static_cast<unsigned>(pillsFor(command.amount)));
+  showDispensingScreen(detail, "");
   const DispenseResult result =
       dispenseMedicine(command.slot, pillsFor(command.amount), scheduleSlotPillHole(command.slot));
   if (result == DispenseResult::Disabled && DISPENSE_DRY_RUN) {
@@ -505,9 +548,24 @@ void handleDispenseOutcome()
   const uint8_t index = static_cast<uint8_t>(outcome.dispenser - 1);
   if (index >= DISPENSER_COUNT) return;
   const bool complete = !outcome.cancelled && outcome.dispensedPills == outcome.requestedPills;
+  // บอกเหตุที่จานหยุด + นับได้/ที่สั่ง + จำนวนรอบที่หมุนจริง (a) ให้ไล่ปัญหาจากเว็บได้ (ช่องบันทึกยาว 32 ตัว)
+  // เช่น "jam 1/2 a1" = ลำแสงถูกบังค้างหลังหมุนรอบเดียว, "no drop 0/2 a40" = หมุนครบทุกช่องแต่ยาไม่ตก
+  const char *why = outcome.stopReason == StopReason::Jam            ? "jam"
+                  : outcome.stopReason == StopReason::Noise          ? "noise"
+                  : outcome.stopReason == StopReason::AllHolesTried  ? "no drop"
+                  : outcome.stopReason == StopReason::Cancelled      ? "cancelled"
+                  : outcome.stopReason == StopReason::AttemptLimit   ? "limit"
+                                                                     : "count";
+  // b = ลำแสงถูกบังแต่ไม่นับกี่ครั้ง ตามด้วยนานสุด เช่น "b1 380us" = เห็นเม็ดแต่สั้นกว่าเกณฑ์ ลดเกณฑ์ได้
+  //     "b0" = เซ็นเซอร์ไม่เห็นอะไรเลย ปัญหาอยู่ที่การเล็งหรือเม็ดไม่ได้ตกผ่านลำแสง
   char failureNote[32];
-  snprintf(failureNote, sizeof(failureNote), "%s %u/%u; check pills",
-           outcome.cancelled ? "cancelled" : "count", outcome.dispensedPills, outcome.requestedPills);
+  if (outcome.sensorVerified)
+    snprintf(failureNote, sizeof(failureNote), "%s %u/%u a%u b%u %luus", why,
+             outcome.dispensedPills, outcome.requestedPills, outcome.attempts, outcome.uncountedBlocks,
+             static_cast<unsigned long>(outcome.longestUncountedUs));
+  else
+    snprintf(failureNote, sizeof(failureNote), "%s %u/%u a%u", why,
+             outcome.dispensedPills, outcome.requestedPills, outcome.attempts);
   const RunOwner owner = runOwner[index];
   runOwner[index] = RunOwner::None;
 
@@ -1071,9 +1129,29 @@ void showBootReport()
 
   Serial.printf("[Boot] %s | %s | %s | %s\n", i2cLine, rtcState, wifiLine, resetLine);
 
+  // ตรวจตัวรับเลเซอร์ทุกจานตอนเปิดเครื่อง ผลขึ้นบนจอ ไม่ต้องต่อคอม (ต่อ USB พร้อม adapter ไม่ได้)
+  static char sensorLine[21];
+  if (!ENABLE_PILL_SENSOR)
+    snprintf(sensorLine, sizeof(sensorLine), "SENSOR: OFF");
+  else
+  {
+    dispenserSensorSelfTest();
+    if (!laserSwitchResponding())
+      snprintf(sensorLine, sizeof(sensorLine), "LASER: NO PCF8574");
+    else
+    {
+      auto mark = [](uint8_t dispenser) {
+        const int8_t status = pillSensorStatus(dispenser);
+        return status > 0 ? "OK" : status == 0 ? "NO" : "--";
+      };
+      snprintf(sensorLine, sizeof(sensorLine), "LASER 1:%s 2:%s 3:%s", mark(1), mark(2), mark(3));
+    }
+  }
+  Serial.printf("[Boot] %s\n", sensorLine);
+
   const char *lines[3] = {i2cLine, rtcState, wifiLine};
-  const char *hints[1] = {resetLine};
-  lcdSetMedicineScreen(lines, 3, hints, 1);
+  const char *hints[2] = {sensorLine, resetLine};
+  lcdSetMedicineScreen(lines, 3, hints, 2);
 
   // lcdSetMedicineScreen แค่เก็บข้อความลง buffer ตัวที่เขียนลงจอจริงคือ lcdMedicineTick()
   // ซึ่งปกติถูกเรียกจาก appLoop() ที่ยังไม่เริ่มทำงานตอนนี้
@@ -1292,6 +1370,10 @@ void appStatusJson(String &out)
   out += "\"net_job_busy\":" + String(netSyncJobBusy() ? "true" : "false") + ",";
   out += "\"setup_active\":" + String(wifiSetupActive() ? "true" : "false") + ",";
   out += "\"pending_doses\":" + String(pendingDoseCount) + ",";
+  // เซ็นเซอร์เลเซอร์: ดูจากมือถือได้ ไม่ต้องต่อคอม (1 = ใช้ได้, 0 = ไม่เห็นแสง, -1 = ยังไม่ได้ตรวจ)
+  out += "\"laser_switch_ok\":" + String(laserSwitchResponding() ? "true" : "false") + ",";
+  out += "\"laser_sensors\":[" + String(pillSensorStatus(1)) + "," + String(pillSensorStatus(2)) + "," +
+         String(pillSensorStatus(3)) + "],";
   // ปุ่มที่อ่านได้ว่า "กดอยู่" ตอนนี้ ถ้าไม่ได้กดแต่ขึ้น true = ปุ่มค้างหรือสายหลวม
   out += "\"buttons_held\":{\"green\":" + String(buttonHeld(ButtonId::Dispense) ? "true" : "false") +
          ",\"yellow\":" + String(buttonHeld(ButtonId::Snooze) ? "true" : "false") +

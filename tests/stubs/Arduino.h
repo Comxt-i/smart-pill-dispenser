@@ -71,7 +71,21 @@ inline void digitalWrite(uint8_t pin, int value)
   writtenLevel[pin] = value;
   writtenAt[pin] = fakeMillis;
 }
-inline void analogWrite(uint8_t pin, int value) { analogWrites.push_back({pin, value}); }
+// analogWrite ห้ามใช้กับมอเตอร์สั่นแล้ว (แย่งช่อง PWM ของ servo) นับไว้ให้เทสต์ยืนยันว่าเป็นศูนย์
+extern int analogWriteCalls;
+inline void analogWrite(uint8_t pin, int value) { ++analogWriteCalls; analogWrites.push_back({pin, value}); }
+// ช่อง LEDC ที่ผูกกับแต่ละขา (-1 = ยังไม่ผูก)
+extern int ledcChannelOf[64];
+inline bool ledcAttachChannel(uint8_t pin, uint32_t, uint8_t, uint8_t channel)
+{
+  ledcChannelOf[pin] = channel;
+  return true;
+}
+inline bool ledcWrite(uint8_t pin, uint32_t duty)
+{
+  analogWrites.push_back({pin, static_cast<int>(duty)});
+  return true;
+}
 
 /** ตั้งทุกขาเป็น HIGH ให้เรียกก่อน dispenserControlBegin() */
 inline void resetPins()

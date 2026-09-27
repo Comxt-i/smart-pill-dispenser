@@ -58,6 +58,9 @@ struct Run {
   uint32_t lastClearUs = 0;     // ลำแสงโล่งครั้งล่าสุดเมื่อไร
   uint32_t blockedUsInPass = 0; // เวลาที่ถูกบังรวมทั้งการผ่านนี้ (ไม่นับช่วงที่กำลังบังอยู่)
   bool jammed = false;          // ลำแสงถูกบังค้าง = มีของติดขวาง
+  StopReason stopReason = StopReason::Done;
+  uint8_t uncountedBlocks = 0;      // การผ่านที่จบโดยบังรวมไม่ถึงเกณฑ์
+  uint32_t longestUncountedUs = 0;  // นานสุดในบรรดาการผ่านที่ไม่นับ
 };
 
 // ทุกช่องไม่มีเม็ดตกเลย + รอบที่ได้เม็ด: เพดานรวมที่ตรรกะข้างล่างไม่มีทางเกิน
@@ -82,6 +85,17 @@ struct SensorEdge {
   uint32_t atUs;
   bool blocked;
 };
+// ระดับสัญญาณที่แปลว่า "ลำแสงถูกบัง" ของแต่ละจาน
+// เริ่มจาก PILL_SENSOR_ACTIVE_LOW แล้วหาจริงเองทุกครั้งที่เปิดเลเซอร์ (ดู laserEnsureOn)
+// ตัวรับต่างรุ่นให้ขั้วต่างกันได้ ผู้ใช้จึงไม่ต้องวัดเองแล้วมาแก้ config
+volatile uint8_t blockedLevel[DISPENSER_COUNT];
+// ตัวรับจานนั้นใช้ไม่ได้ (ค่าไม่เปลี่ยนตอนเปิด/ปิดเลเซอร์) ห้ามจ่ายจานนั้น
+bool sensorFault[DISPENSER_COUNT] = {};
+// ตรวจตัวรับจานนั้นแล้วหรือยัง (ตรวจทุกครั้งที่เปิดเลเซอร์จากดับ) ใช้แยก "ยังไม่รู้" ออกจาก "ใช้ได้"
+bool sensorTested[DISPENSER_COUNT] = {};
+// PCF8574 ตอบครั้งล่าสุดที่สั่งไหม
+bool laserSwitchOk = true;
+
 constexpr uint8_t EDGE_QUEUE_SIZE = 32;
 struct EdgeQueue {
   SensorEdge items[EDGE_QUEUE_SIZE];
@@ -102,8 +116,7 @@ void IRAM_ATTR onSensorEdge(void *arg)
     return;
   }
   const int level = digitalRead(PILL_SENSOR_PINS[index]);
-  queue.items[queue.head] = {static_cast<uint32_t>(micros()),
-                             PILL_SENSOR_ACTIVE_LOW ? level == LOW : level == HIGH};
+  queue.items[queue.head] = {static_cast<uint32_t>(micros()), level == blockedLevel[index]};
   queue.head = next;
 }
 
@@ -147,10 +160,32 @@ uint8_t activeCount()
 // เพราะบน ESP32 การ analogWrite จะผูกขานั้นเข้ากับ LEDC แล้ว digitalWrite ภายหลัง
 // อาจไม่มีผล ทำให้มอเตอร์ไม่ดับตามสั่ง
 
+/**
+ * เขียนความแรงมอเตอร์สั่นผ่านช่อง LEDC ที่จองไว้เอง (ดู VIB_LEDC_CHANNELS ใน config.h)
+ * ห้ามกลับไปใช้ analogWrite: จะไปแย่งช่องของ servo แล้ว servo ไม่หมุน
+ */
+bool vibAttached[DISPENSER_COUNT] = {};
+
+void vibWrite(uint8_t index, uint8_t duty)
+{
+  if (!vibAttached[index])
+  {
+    vibAttached[index] = ledcAttachChannel(VIB_PWM_PINS[index], VIB_PWM_FREQ_HZ, VIB_PWM_RESOLUTION_BITS,
+                                           VIB_LEDC_CHANNELS[index]);
+    if (!vibAttached[index])
+    {
+      Serial.printf("[มอเตอร์สั่น] จาน %u ผูกช่อง PWM %u ไม่สำเร็จ\n",
+                    static_cast<unsigned>(index + 1), static_cast<unsigned>(VIB_LEDC_CHANNELS[index]));
+      return;
+    }
+  }
+  ledcWrite(VIB_PWM_PINS[index], duty);
+}
+
 void vibrateOn(uint8_t index, unsigned long now)
 {
   digitalWrite(VIB_DIR_PINS[index], LOW);
-  analogWrite(VIB_PWM_PINS[index], VIB_KICK_SPEED);
+  vibWrite(index, VIB_KICK_SPEED);
   runs[index].kicking = true;
   runs[index].kickStartedMs = now;
 }
@@ -160,14 +195,14 @@ void vibrateBrake(uint8_t index)
 {
   runs[index].kicking = false;
   digitalWrite(VIB_DIR_PINS[index], HIGH);
-  analogWrite(VIB_PWM_PINS[index], 255);
+  vibWrite(index, 255);
 }
 
 void vibrateOff(uint8_t index)
 {
   runs[index].kicking = false;
   digitalWrite(VIB_DIR_PINS[index], LOW);
-  analogWrite(VIB_PWM_PINS[index], 0);
+  vibWrite(index, 0);
 }
 
 /** ผ่อนกำลังจากจังหวะกระตุกลงมาที่ความแรงปกติ */
@@ -179,7 +214,7 @@ void tickKick(uint8_t index, unsigned long now)
   if (now - run.kickStartedMs < VIB_KICK_MS)
     return;
 
-  analogWrite(VIB_PWM_PINS[index], VIB_SPEED);
+  vibWrite(index, VIB_SPEED);
   run.kicking = false;
 }
 
@@ -189,8 +224,7 @@ void tickKick(uint8_t index, unsigned long now)
 
 bool readSensor(uint8_t index)
 {
-  const int level = digitalRead(PILL_SENSOR_PINS[index]);
-  return PILL_SENSOR_ACTIVE_LOW ? (level == LOW) : (level == HIGH);
+  return digitalRead(PILL_SENSOR_PINS[index]) == blockedLevel[index];
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +244,8 @@ bool laserWrite(bool on)
   const bool pinHigh = on != LASER_SWITCH_ACTIVE_LOW;
   Wire.beginTransmission(LASER_PCF8574_ADDRESS);
   Wire.write(pinHigh ? 0xFF : static_cast<uint8_t>(0xFF & ~mask));
-  if (Wire.endTransmission() == 0)
+  laserSwitchOk = Wire.endTransmission() == 0;
+  if (laserSwitchOk)
     return true;
   Serial.printf("[เลเซอร์] ไม่พบ PCF8574 ที่ 0x%02X เปิด-ปิดเลเซอร์ไม่ได้ ตรวจสายและจั๊มเปอร์ A0-A2\n",
                 LASER_PCF8574_ADDRESS);
@@ -222,12 +257,52 @@ void laserEnsureOn()
 {
   if (!ENABLE_LASER_SWITCH || !ENABLE_PILL_SENSOR || laserLit)
     return;
+
+  // เลเซอร์ดับอยู่ = ตัวรับเห็นมืด = ระดับเดียวกับตอนลำแสงถูกบัง อ่านเก็บไว้ก่อนเปิด
+  int dark[DISPENSER_COUNT];
+  for (uint8_t i = 0; i < DISPENSER_COUNT; ++i)
+    dark[i] = digitalRead(PILL_SENSOR_PINS[i]);
+
   // ชิปไม่ตอบ: เลเซอร์ไม่ติด ตัวรับจะเห็นมืด แล้วการจ่ายถูกปฏิเสธว่าเซ็นเซอร์ถูกบัง ซึ่งปลอดภัยกว่าจ่ายแบบนับไม่ได้
   if (!laserWrite(true))
     return;
   laserLit = true;
+
+  // รอจนตัวรับทุกตัวเห็นแสง (ค่าเปลี่ยนจากตอนมืด) หรือหมดเวลา แล้วรอให้นิ่งอีกช่วงสั้นๆ
   // block ได้: ตอนเลเซอร์ดับไม่มีจานไหนทำงานอยู่ จึงไม่มีเซ็นเซอร์หรือ servo ต้องดูแลระหว่างรอ
+  const unsigned long startedMs = millis();
+  bool waiting = true;
+  while (waiting && millis() - startedMs < LASER_RESPONSE_TIMEOUT_MS)
+  {
+    delay(5);
+    waiting = false;
+    for (uint8_t i = 0; i < DISPENSER_COUNT; ++i)
+      if (digitalRead(PILL_SENSOR_PINS[i]) == dark[i])
+        waiting = true;
+  }
+  const unsigned long respondedMs = millis() - startedMs;
   delay(LASER_SETTLE_MS);
+  Serial.printf("[เลเซอร์] เปิดแล้ว ตัวรับตอบใน %lu ms%s\n", respondedMs,
+                waiting ? " (บางจานไม่เห็นแสงจนหมดเวลา)" : "");
+
+  // เทียบตอนมืดกับตอนสว่าง: ต่างกัน = ตัวรับใช้ได้ และระดับตอนมืดคือระดับ "ถูกบัง"
+  // เหมือนกัน = เล็งไม่โดน ตัวรับไม่มีไฟ สายหลุด หรือแสงรอบข้างแรงจนกลบเลเซอร์ นับเม็ดไม่ได้แน่นอน
+  for (uint8_t i = 0; i < DISPENSER_COUNT; ++i)
+  {
+    const int lit = digitalRead(PILL_SENSOR_PINS[i]);
+    const bool fault = lit == dark[i];
+    if (fault && !sensorFault[i])
+      Serial.printf("[เซ็นเซอร์] จาน %u ค่าไม่เปลี่ยนตอนเปิด/ปิดเลเซอร์ (เล็งไม่โดน ตัวรับไม่มีไฟ สายหลุด "
+                    "หรือแสงรอบข้างแรงเกิน) ไม่จ่ายจานนี้จนกว่าจะแก้\n",
+                    static_cast<unsigned>(i + 1));
+    else if (!fault && (sensorFault[i] || blockedLevel[i] != dark[i]))
+      Serial.printf("[เซ็นเซอร์] จาน %u ใช้งานได้ ลำแสงถูกบัง = %s\n",
+                    static_cast<unsigned>(i + 1), dark[i] == LOW ? "LOW" : "HIGH");
+    sensorFault[i] = fault;
+    sensorTested[i] = true;
+    if (!fault)
+      blockedLevel[i] = static_cast<uint8_t>(dark[i]);
+  }
 }
 
 /** ดับเลเซอร์เมื่อไม่มีจานไหนจ่ายอยู่แล้ว */
@@ -286,6 +361,19 @@ void countPill(uint8_t index)
     run.targetReached = true;
 }
 
+/** การผ่านนี้จบแล้ว ถ้าไม่ถูกนับเป็นเม็ด จดไว้ให้เห็นบนเว็บว่าเซ็นเซอร์เห็นอะไรบางอย่าง แต่สั้นกว่าเกณฑ์ */
+void endPass(Run &run)
+{
+  if (run.inPass && !run.passCounted && run.blockedUsInPass > 0)
+  {
+    if (run.uncountedBlocks < 255)
+      ++run.uncountedBlocks;
+    if (run.blockedUsInPass > run.longestUncountedUs)
+      run.longestUncountedUs = run.blockedUsInPass;
+  }
+  run.inPass = false;
+}
+
 void handleEdge(uint8_t index, const SensorEdge &edge)
 {
   Run &run = runs[index];
@@ -296,6 +384,7 @@ void handleEdge(uint8_t index, const SensorEdge &edge)
     // โล่งนานพอแล้ว = เม็ดใหม่ ถ้าโล่งแค่แวบเดียว = ยังเป็นเม็ดเดิม
     if (!run.inPass || edge.atUs - run.lastClearUs >= MERGE_GAP_US)
     {
+      endPass(run);
       run.inPass = true;
       run.passCounted = false;
       run.blockedUsInPass = 0;
@@ -344,6 +433,7 @@ void pollSensor(uint8_t index)
     run.blockedUsInPass = 0;
     run.blockStartUs = run.lastClearUs = static_cast<uint32_t>(micros());
     run.targetReached = true;
+    run.stopReason = StopReason::Noise;
     return;
   }
 
@@ -358,13 +448,14 @@ void pollSensor(uint8_t index)
     {
       run.jammed = true;
       run.targetReached = true;  // พาจานกลับตำแหน่งพักแล้วจบ ห้ามปล่อยยาเพิ่มขณะมองไม่เห็น
+      run.stopReason = StopReason::Jam;
       Serial.printf("[เซ็นเซอร์] จาน %u ลำแสงถูกบังค้างเกิน %lu ms มีเม็ดยาติด หยุดจ่าย\n",
                     static_cast<unsigned>(index + 1), static_cast<unsigned long>(PILL_JAM_MS));
     }
   }
   else if (run.inPass && nowUs - run.lastClearUs >= MERGE_GAP_US)
   {
-    run.inPass = false;  // โล่งนานพอแล้ว การผ่านนี้จบ
+    endPass(run);  // โล่งนานพอแล้ว การผ่านนี้จบ
   }
 }
 
@@ -389,6 +480,11 @@ void finishRun(uint8_t index, bool cancelled)
   outcome.attempts = run.attempts;
   outcome.cancelled = cancelled;
   outcome.sensorVerified = ENABLE_PILL_SENSOR;
+  outcome.stopReason = cancelled ? StopReason::Cancelled : run.stopReason;
+  if (!run.beamBlocked)
+    endPass(run);  // การผ่านที่ค้างอยู่ตอนจบรอบ นับรวมในสถิติด้วย
+  outcome.uncountedBlocks = run.uncountedBlocks;
+  outcome.longestUncountedUs = run.longestUncountedUs;
 
   // ไม่มีเซ็นเซอร์ = เชื่อว่าหมุนครบรอบแล้วยาออกครบ ซึ่งยืนยันไม่ได้
   // sensorVerified บอก pill_app ให้ติดป้ายไว้ในบันทึกว่าไม่ได้ตรวจจริง
@@ -527,6 +623,7 @@ void updateRun(uint8_t index, unsigned long now)
                           static_cast<unsigned>(index + 1),
                           static_cast<unsigned>(run.countedPills),
                           static_cast<unsigned>(run.requestedPills));
+            run.stopReason = StopReason::AllHolesTried;
             finishRun(index, false);
             return;
           }
@@ -539,6 +636,7 @@ void updateRun(uint8_t index, unsigned long now)
       // กันหลุดซ้อนอีกชั้น ตามตรรกะข้างบนไม่ควรมาถึงได้
       if (run.attempts >= MAX_TOTAL_ATTEMPTS)
       {
+        run.stopReason = StopReason::AttemptLimit;
         finishRun(index, false);
         return;
       }
@@ -582,6 +680,9 @@ void dispenserControlBegin()
     // GPIO34-39 เป็นขาอินพุตอย่างเดียวและ **ไม่มี pull-up ในตัวชิป**
     // โมดูล IR ต้องขับสัญญาณเองแบบ push-pull ไม่อย่างนั้นต้องใส่ตัวต้านทาน pull-up ภายนอก
     pinMode(PILL_SENSOR_PINS[index], INPUT);
+    blockedLevel[index] = PILL_SENSOR_ACTIVE_LOW ? LOW : HIGH;
+    sensorFault[index] = false;
+    sensorTested[index] = false;
     if (ENABLE_PILL_SENSOR)
       attachInterruptArg(digitalPinToInterrupt(PILL_SENSOR_PINS[index]), onSensorEdge,
                          reinterpret_cast<void *>(static_cast<uintptr_t>(index)), CHANGE);
@@ -639,7 +740,10 @@ DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills, int8_t preferr
 
   // ต้องเปิดเลเซอร์ก่อนอ่าน ไม่อย่างนั้นตัวรับไม่เห็นแสงและรายงานว่าถูกบังทุกครั้ง
   laserEnsureOn();
-  if (ENABLE_PILL_SENSOR && readSensor(index))
+  // สั่งเปิดไม่ได้ = ตัวรับมืดทุกตัว ต้องบอกให้ตรงว่าเป็นที่สาย I2C ไม่ใช่ที่ช่องจ่ายยา
+  if (ENABLE_LASER_SWITCH && ENABLE_PILL_SENSOR && !laserLit)
+    return DispenseResult::LaserOff;
+  if (ENABLE_PILL_SENSOR && (sensorFault[index] || readSensor(index)))
   {
     laserOffIfIdle();
     return DispenseResult::SensorBlocked;
@@ -658,6 +762,9 @@ DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills, int8_t preferr
   run.countedPills = 0;
   run.attempts = 0;
   run.targetReached = false;
+  run.stopReason = StopReason::Done;
+  run.uncountedBlocks = 0;
+  run.longestUncountedUs = 0;
 
   // ลำดับช่องที่จะลอง: ช่องตามขนาดที่ผู้ใช้กรอกก่อน แล้วเฉพาะช่องที่ใหญ่กว่าไล่ขึ้นไป
   // ไม่ย้อนไปช่องที่เล็กกว่า เพราะเม็ดที่ไม่ผ่านช่องขนาดตัวเองย่อมไม่ผ่านช่องที่เล็กกว่าแน่นอน
@@ -735,6 +842,31 @@ bool takeDispenseOutcome(DispenseOutcome &outcome)
   outcomeHead = static_cast<uint8_t>((outcomeHead + 1) % DISPENSER_COUNT);
   --outcomeCount;
   return true;
+}
+
+void dispenserSensorSelfTest()
+{
+  // เปิดเลเซอร์แป๊บเดียวให้ laserEnsureOn() เทียบตอนมืดกับตอนสว่างของทุกจาน แล้วดับ
+  // ห้ามทำตอนมีจานทำงาน: เลเซอร์ต้องติดค้างให้จานนั้น และการเทียบต้องเริ่มจากตอนดับ
+  if (!ENABLE_LASER_SWITCH || !ENABLE_PILL_SENSOR || activeCount() > 0 || laserLit)
+    return;
+  laserEnsureOn();
+  laserOffIfIdle();
+}
+
+bool laserSwitchResponding()
+{
+  return !ENABLE_LASER_SWITCH || laserSwitchOk;
+}
+
+int8_t pillSensorStatus(uint8_t dispenser)
+{
+  if (!ENABLE_PILL_SENSOR || dispenser < 1 || dispenser > DISPENSER_COUNT)
+    return -1;
+  const uint8_t index = static_cast<uint8_t>(dispenser - 1);
+  if (ENABLE_LASER_SWITCH && !sensorTested[index])
+    return -1;
+  return sensorFault[index] ? 0 : 1;
 }
 
 bool pillSensorBlocked(uint8_t dispenser)

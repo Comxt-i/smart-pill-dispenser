@@ -11,6 +11,7 @@
 //   r  อ่านระดับตัวรับทั้งสามตอนนี้
 //   w  โหมดดูเม็ดยา: เปิดเลเซอร์แล้วรายงานทุกครั้งที่ลำแสงถูกบัง พร้อมเวลาที่บัง (พิมพ์ w อีกครั้งเพื่อหยุด)
 //   l  ไล่ไฟจราจร แดง เหลือง เขียว
+//   v  เปิด/ปิดมอเตอร์สั่นทุกจาน (ความแรงเท่าตอนจ่ายจริง) ใช้คู่กับ w ดูว่าแรงสั่นทำให้พลาดเม็ดไหม
 //
 // ค่าข้างล่างตรงกับ ESP32_Main/config.h ถ้าแก้ที่นั่นต้องแก้ตรงนี้ด้วย
 
@@ -34,6 +35,11 @@ constexpr bool BUZZER_ACTIVE_HIGH = true;
 
 // ขามอเตอร์สั่น DRV8833 ต้องเป็น LOW ทันที ไม่งั้น GPIO14 ที่ปล่อยสัญญาณตอนบูตจะทำให้มอเตอร์จาน 3 หมุนค้าง
 constexpr uint8_t MOTOR_PINS[] = {13, 26, 4, 16, 17, 14};
+// มอเตอร์สั่น: ขา PWM ของแต่ละจาน ช่อง PWM และความแรง ตรงกับ config.h (VIB_PWM_PINS, VIB_LEDC_CHANNELS, VIB_SPEED)
+constexpr uint8_t VIB_PWM_PINS[3] = {13, 26, 4};
+constexpr uint8_t VIB_LEDC_CHANNELS[3] = {4, 5, 6};
+constexpr uint8_t VIB_SPEED = 70;
+bool vibrating = false;
 
 // ตัวกรองเดียวกับเฟิร์มแวร์จริง: บังรวมต่ำกว่านี้ = สัญญาณรบกวน
 constexpr uint32_t PILL_MIN_BLOCK_US = 500;
@@ -243,11 +249,25 @@ void serviceWatch()
   }
 }
 
+/** เปิด/ปิดมอเตอร์สั่นทุกจาน ใช้ดูว่าแรงสั่นหรือไฟตกจากมอเตอร์ทำให้เซ็นเซอร์พลาดหรือนับมั่วไหม */
+void toggleVibration()
+{
+  vibrating = !vibrating;
+  for (uint8_t i = 0; i < 3; ++i)
+  {
+    static bool attached[3] = {};
+    if (!attached[i])
+      attached[i] = ledcAttachChannel(VIB_PWM_PINS[i], 1000, 8, VIB_LEDC_CHANNELS[i]);
+    ledcWrite(VIB_PWM_PINS[i], vibrating ? VIB_SPEED : 0);
+  }
+  Serial.println(vibrating ? "มอเตอร์สั่นทำงาน (ทุกจาน) พิมพ์ v อีกครั้งเพื่อหยุด" : "มอเตอร์สั่นหยุดแล้ว");
+}
+
 void printHelp()
 {
   Serial.println();
   Serial.println("คำสั่ง: s=สแกน I2C  1=เลเซอร์ติด  0=เลเซอร์ดับ  t=ทดสอบ relay  p=หาขั้วสัญญาณ");
-  Serial.println("        r=อ่านตัวรับ  w=ดูเม็ดยา(เปิด/ปิด)  l=ทดสอบไฟจราจร");
+  Serial.println("        r=อ่านตัวรับ  w=ดูเม็ดยา(เปิด/ปิด)  l=ทดสอบไฟจราจร  v=มอเตอร์สั่น(เปิด/ปิด)");
 }
 
 void setup()
@@ -291,7 +311,7 @@ void loop()
     return;
 
   // ออกจากโหมดดูก่อนทำคำสั่งอื่น
-  if (watching && command != 'w')
+  if (watching && command != 'w' && command != 'v')
     stopWatch();
 
   switch (command)
@@ -304,6 +324,7 @@ void loop()
     case 'r': readSensors("ตอนนี้:"); break;
     case 'w': watching ? stopWatch() : startWatch(); break;
     case 'l': ledTest(); break;
+    case 'v': toggleVibration(); break;
     default: printHelp(); break;
   }
 }

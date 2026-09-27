@@ -53,6 +53,9 @@ void eventQueueBegin() {}
 void scheduleBegin(void (*)(const DoseRef&, DoseState, DoseState)) {}
 void dispenserControlBegin() {}
 void dispenserHomeAll() {}
+void dispenserSensorSelfTest() {}
+bool laserSwitchResponding() { return true; }
+int8_t pillSensorStatus(uint8_t) { return 1; }
 const char *doseStateName(DoseState) { return ""; }
 void netSyncBegin() {}
 void netSyncService() {}
@@ -118,6 +121,8 @@ bool outcomeReady = false;
 DispenseOutcome suppliedOutcome = {};
 void commandJournalDoseKey(char*, size_t, const char*, uint32_t, bool) {}
 bool commandJournalReserve(const char*, uint32_t) { return true; }
+bool commandJournalRelease(const char*) { return true; }
+const char *commandJournalLastError() { return ""; }
 void dispenserControlUpdate() { ++motionTicks; }
 void wifiWebLoop() { ++networkCalls; }
 void rtcLcdUpdate() { ++clockCalls; }
@@ -244,12 +249,12 @@ int main() {
   appLoop(); // This release starts motion before the HTTP sync phase.
   assert(busy && networkCalls == 1); // Only pre-gesture local web handling, no HTTP sync.
   resetCase(); runOwner[0] = RunOwner::Command;
-  suppliedOutcome = {1, 1, 2, 1, false, true}; outcomeReady = true;
+  suppliedOutcome = {1, 1, 2, 1, false, true, StopReason::Done, 0, 0}; outcomeReady = true;
   handleDispenseOutcome();
   assert(strcmp(lastEvent.status, "FAILED") == 0 && strstr(lastEvent.note, "2/1"));
   resetCase(); runOwner[0] = RunOwner::Dose;
   testDose.failureReported = false;
-  suppliedOutcome = {1, 2, 1, 1, false, true}; outcomeReady = true;
+  suppliedOutcome = {1, 2, 1, 1, false, true, StopReason::Done, 0, 0}; outcomeReady = true;
   handleDispenseOutcome();
   assert(testDose.state == DoseState::Failed && strstr(lastEvent.note, "1/2"));
 

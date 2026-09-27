@@ -118,6 +118,27 @@ static_assert(restPulsesValid(0) && holePulsesValid(0, 0),
 constexpr uint8_t VIB_PWM_PINS[DISPENSER_COUNT] = {13, 26, 4};
 constexpr uint8_t VIB_DIR_PINS[DISPENSER_COUNT] = {16, 17, 14};
 
+// ช่อง PWM (LEDC) ของมอเตอร์สั่น ต้องระบุเอง ห้ามใช้ analogWrite
+//
+// ESP32 core 3.x ให้ analogWrite จองช่องว่างเลขน้อยสุด (0, 1, 2) ส่วนไลบรารี servo มีตารางจองของตัวเอง
+// ไม่รู้ว่าช่องถูกใช้แล้ว จึงเลือกช่อง 0, 1 ซ้ำ core ยอมผูกขา servo เข้าช่องเดิมโดยไม่เปลี่ยนความถี่
+// servo จึงได้ PWM 1 kHz ของมอเตอร์แทนพัลส์ 50 Hz แล้วแค่กระตุก ไม่หมุนไปถึงช่องปล่อยยา
+// (บันทึกบนเว็บขึ้น "no drop 0/1 a20": สั่งหมุน 20 รอบแต่จานแทบไม่ขยับ)
+//
+// servo ใช้ timer 0 และ 1 (ESP32PWM::allocateTimer ใน ESP32_Main.ino) = ช่อง 0-3 และ 8-11
+// มอเตอร์สั่นจึงใช้ช่องบน timer 2-3 = ช่อง 4-7 หรือ 12-15 เท่านั้น
+constexpr uint8_t VIB_LEDC_CHANNELS[DISPENSER_COUNT] = {4, 5, 6};
+constexpr uint32_t VIB_PWM_FREQ_HZ = 1000;  // เท่าค่าเดิมของ analogWrite
+constexpr uint8_t VIB_PWM_RESOLUTION_BITS = 8;  // ความแรง 0-255 เท่าเดิม
+constexpr bool vibChannelsClearOfServos(unsigned i)
+{
+  return i >= DISPENSER_COUNT ||
+         ((VIB_LEDC_CHANNELS[i] / 2) % 4 >= 2 && VIB_LEDC_CHANNELS[i] < 16 && vibChannelsClearOfServos(i + 1));
+}
+static_assert(vibChannelsClearOfServos(0), "vibration PWM channels must stay off the servo timers (use 4-7 or 12-15)");
+static_assert(VIB_LEDC_CHANNELS[0] != VIB_LEDC_CHANNELS[1] && VIB_LEDC_CHANNELS[1] != VIB_LEDC_CHANNELS[2] &&
+              VIB_LEDC_CHANNELS[0] != VIB_LEDC_CHANNELS[2], "each vibration motor needs its own PWM channel");
+
 // ความแรงสั่น 0-255 (ช่วงที่ใช้ได้จริงราว 60-130)
 // มอเตอร์สั่นส่วนใหญ่เป็นรุ่น 3V ถ้าจ่ายไฟมอเตอร์ 5V ต้องไม่เกินราว 150
 constexpr uint8_t VIB_SPEED = 70;
@@ -145,7 +166,9 @@ static_assert(!ENABLE_SERVO_MOVEMENT || ENABLE_PILL_SENSOR || PILLBOX_ALLOW_UNVE
 // โมดูล IR ต้องขับสัญญาณเองแบบ push-pull ไม่อย่างนั้นต้องใส่ pull-up ภายนอก 10k
 constexpr uint8_t PILL_SENSOR_PINS[DISPENSER_COUNT] = {34, 35, 36};
 
-// โมดูล IR ส่วนใหญ่ให้เอาต์พุต LOW เมื่อลำแสงถูกบัง
+// ขั้วสัญญาณตอนลำแสงถูกบัง: ใช้เป็นค่าเริ่มต้นเท่านั้น
+// เมื่อเปิดสวิตช์เลเซอร์ (ENABLE_LASER_SWITCH) เครื่องหาขั้วจริงของตัวรับแต่ละตัวเองทุกครั้งที่เปิดเลเซอร์
+// (เลเซอร์ดับ = ตัวรับเห็นมืด = ระดับเดียวกับตอนถูกบัง) ค่านี้จึงมีผลเฉพาะตอนใช้เลเซอร์/IR แบบติดตลอด
 constexpr bool PILL_SENSOR_ACTIVE_LOW = true;
 
 // ---------------------------------------------------------------------------
@@ -190,10 +213,15 @@ constexpr uint8_t LASER_PCF_BIT = 0;
 constexpr bool LASER_SWITCH_ACTIVE_LOW = true;
 static_assert(LASER_SWITCH_ACTIVE_LOW, "PCF8574 cannot drive an active-high relay input");
 
-// หลังสั่งเปิด รอให้หน้าสัมผัส relay และตัวรับนิ่งก่อนเริ่มอ่านเซ็นเซอร์
-// relay มีหน้าสัมผัสเด้งราว 10-15 ms บวกเวลาส่ง I2C จึงเผื่อไว้
-// อ่านเร็วไป เครื่องจะเห็นลำแสงถูกบัง แล้วปฏิเสธการจ่ายว่า "เซ็นเซอร์ถูกบัง"
-constexpr unsigned long LASER_SETTLE_MS = 60;
+// หลังสั่งเปิด เครื่องรอจนตัวรับทุกตัว "เห็นแสง" จริง (ค่าเปลี่ยนจากตอนมืด) แล้วรอให้นิ่งอีกนิด
+// ตัวรับแต่ละรุ่นตอบสนองเร็วช้าต่างกันมาก เดิมรอตายตัว 60 ms ตัวรับที่ช้ากว่านั้นถูกตัดสินว่า
+// "ไม่เห็นแสง" แล้วไม่ยอมจ่าย (relay ติดแป๊บเดียวแล้วดับ) ทั้งที่โค้ดทดสอบซึ่งรอ 260 ms ใช้ได้ปกติ
+//
+// รอให้นิ่งหลังตัวรับตอบแล้ว (หน้าสัมผัส relay เด้งราว 10-15 ms)
+constexpr unsigned long LASER_SETTLE_MS = 30;
+// รอตัวรับตอบนานสุดเท่านี้ เกินแล้วยังไม่เห็นแสง = เล็งไม่ตรง ไม่มีไฟ หรือยังไม่ได้ต่อ
+// (จานที่ยังไม่ต่อตัวรับจะทำให้ทุกการจ่ายรอเต็มเวลานี้ ต่อให้ครบแล้วจะเร็วขึ้นเอง)
+constexpr unsigned long LASER_RESPONSE_TIMEOUT_MS = 500;
 
 // อ่านเซ็นเซอร์ด้วย interrupt แล้วแยกเม็ดยาจากสัญญาณรบกวน (ดู pollSensor ใน dispenser_control.cpp)
 //

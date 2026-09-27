@@ -3,7 +3,9 @@
 #include "config.h"
 #include <Arduino.h>
 
-enum class DispenseResult { Started, Invalid, Disabled, Busy, Cancelled, ServoError, SensorBlocked };
+// SensorBlocked = ตัวรับไม่เห็นแสงเลเซอร์ (มีของขวาง เล็งไม่ตรง หรือตัวรับไม่มีไฟ แยกกันไม่ได้ทางไฟฟ้า)
+// LaserOff      = สั่งเปิดเลเซอร์ไม่ได้ (PCF8574 ไม่ตอบทางบัส I2C)
+enum class DispenseResult { Started, Invalid, Disabled, Busy, Cancelled, ServoError, SensorBlocked, LaserOff };
 
 /**
  * ผลของการจ่ายยาหนึ่งครั้งที่ "จบแล้ว" ไม่ว่าจะจบครบหรือถูกยกเลิกกลางคัน
@@ -11,6 +13,18 @@ enum class DispenseResult { Started, Invalid, Disabled, Busy, Cancelled, ServoEr
  * นับเป็นเม็ด ไม่ใช่รอบหมุน เพราะเซ็นเซอร์ IR ยืนยันเม็ดที่ตกจริง
  * จำนวนรอบที่หมุนไปกี่รอบเป็นเพียงผลพลอยได้ เก็บไว้ดูว่ากลไกฝืดแค่ไหน
  */
+/**
+ * เหตุที่รอบจ่ายจบ ส่งขึ้นบันทึกบนเว็บ ดูจากมือถือได้ว่าทำไมจานหยุด โดยไม่ต้องต่อคอมดู Serial
+ */
+enum class StopReason : uint8_t {
+  Done,           // นับได้ครบตามที่สั่ง
+  AllHolesTried,  // ลองครบทุกช่องแล้วไม่มีเม็ดตกเพิ่ม
+  Jam,            // ลำแสงถูกบังค้าง มีของติดขวาง
+  Noise,          // สัญญาณรบกวนถี่จนนับไม่ได้ หยุดกันจ่ายเกิน
+  Cancelled,      // ถูกสั่งหยุด (ปุ่มแดง)
+  AttemptLimit,   // ชนเพดานจำนวนรอบ (ตามตรรกะไม่ควรเกิด)
+};
+
 struct DispenseOutcome {
   uint8_t dispenser;       // จาน 1..DISPENSER_COUNT
   uint8_t requestedPills;  // จำนวนเม็ดที่สั่ง
@@ -18,6 +32,11 @@ struct DispenseOutcome {
   uint8_t attempts;        // หมุนไปกี่รอบกว่าจะได้ครบ
   bool cancelled;          // true = ถูกสั่งหยุดก่อนครบ
   bool sensorVerified;     // true = นับจากเซ็นเซอร์ IR จริง
+  StopReason stopReason;   // ทำไมรอบนี้จบ (finishRun ตั้งให้ทุกครั้ง)
+  // ลำแสงถูกบังแต่ไม่ถึงเกณฑ์ PILL_MIN_BLOCK_US (ไม่นับเป็นเม็ด) กี่ครั้ง และนานสุดเท่าไร
+  // ใช้แยก "เซ็นเซอร์เห็นเม็ดเล็กแต่สั้นเกินเกณฑ์" ออกจาก "เซ็นเซอร์ไม่เห็นอะไรเลย"
+  uint8_t uncountedBlocks;
+  uint32_t longestUncountedUs;
 };
 
 /**
@@ -79,3 +98,13 @@ bool takeDispenseOutcome(DispenseOutcome &outcome);
 
 /** อ่านสถานะดิบของเซ็นเซอร์ IR ของจานหนึ่ง สำหรับหน้าเว็บวินิจฉัย */
 bool pillSensorBlocked(uint8_t dispenser);
+
+/**
+ * ตรวจตัวรับเลเซอร์ทุกจานตอนนี้เลย (เปิดเลเซอร์แป๊บหนึ่ง เทียบตอนมืดกับตอนสว่าง แล้วดับ)
+ * ใช้ตอนเปิดเครื่อง ให้เห็นผลบนจอโดยไม่ต้องต่อคอม ข้ามเองถ้ามีจานทำงานอยู่
+ */
+void dispenserSensorSelfTest();
+/** PCF8574 ที่คุม relay เลเซอร์ตอบครั้งล่าสุดที่สั่งไหม (ไม่ใช้สวิตช์เลเซอร์ = true) */
+bool laserSwitchResponding();
+/** ตัวรับของจานนั้น: 1 = ใช้ได้, 0 = ไม่เห็นแสงเลเซอร์, -1 = ยังไม่ได้ตรวจหรือปิดเซ็นเซอร์ */
+int8_t pillSensorStatus(uint8_t dispenser);

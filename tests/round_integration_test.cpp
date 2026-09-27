@@ -1,5 +1,6 @@
 #include <cassert>
 #include <vector>
+#include <algorithm>
 #include <string>
 #include <ESP32Servo.h>
 #include <Wire.h>
@@ -27,9 +28,20 @@ void attachInterruptArg(uint8_t pin, void (*handler)(void *), void *arg, int) { 
 /** เปลี่ยนระดับขาแบบฮาร์ดแวร์จริง: interrupt ที่ผูกไว้ทำงานทันที */
 void drive(uint8_t pin, int level) { if (levels[pin] == level) return; levels[pin] = level; if (sensorIsr[pin]) sensorIsr[pin](sensorIsrArg[pin]); }
 void pinMode(uint8_t, uint8_t) {}
-int digitalRead(uint8_t pin) { return levels[pin]; }
+// ตัวรับเลเซอร์จริง: relay ดับ (P0 ของ PCF8574 เป็น HIGH) = มืด = อ่านได้เหมือนถูกบัง
+int digitalRead(uint8_t pin) {
+  for (uint8_t i = 0; i < DISPENSER_COUNT; ++i) {
+    if (pin != PILL_SENSOR_PINS[i] || !ENABLE_LASER_SWITCH) continue;
+    const int pcf = Wire.lastValue[LASER_PCF8574_ADDRESS];
+    const bool lit = pcf >= 0 && !((pcf >> LASER_PCF_BIT) & 1);
+    if (!lit) return LOW;
+  }
+  return levels[pin];
+}
 void digitalWrite(uint8_t pin, int value) { (void)pin; (void)value; }
 void analogWrite(uint8_t pin, int value) { (void)pin; (void)value; }
+bool ledcAttachChannel(uint8_t, uint32_t, uint8_t, uint8_t) { return true; }
+bool ledcWrite(uint8_t, uint32_t) { return true; }
 // ไฟสถานะไม่มีผลต่อพฤติกรรมที่เทสต์นี้ตรวจ จึงกลืนทิ้ง
 // แต่ต้องมี ไม่อย่างนั้นลิงก์ไม่ผ่านเพราะ pill_app.cpp เรียกใช้จริง
 void statusLedBegin() {}
@@ -41,7 +53,11 @@ void alertOneShot(AlertPattern) {}
 void alertUpdate() {}
 void lcdShowMessage(const char*, const char*) { assert(!dispenserIsBusy()); }
 void lcdMedicineTick() { assert(!dispenserIsBusy()); }
-void lcdSetMedicineScreen(const char *const*, uint8_t, const char *const*, uint8_t) { assert(!dispenserIsBusy()); }
+std::string lcdTitle;  // บรรทัดแรกของจอยาครั้งล่าสุด
+void lcdSetMedicineScreen(const char *const *lines, uint8_t count, const char *const*, uint8_t) {
+  assert(!dispenserIsBusy());  // ห้ามแตะบัส I2C ระหว่างมอเตอร์ทำงาน
+  lcdTitle = count ? lines[0] : "";
+}
 bool rtcIsValid() { return true; }
 // หน้าจอรายงานผลสแกน I2C ตอนบูตเรียกสามตัวนี้
 // Reached only from appBegin()/appStatusJson(), which this test never calls.
@@ -112,6 +128,13 @@ bool commandJournalReserve(const char *key, uint32_t) {
   for (const auto &id : reservedKeys) if (id == key) return false;
   reservedKeys.emplace_back(key); return true;
 }
+int releases = 0;
+bool commandJournalRelease(const char *key) {
+  for (auto it = reservedKeys.begin(); it != reservedKeys.end(); ++it)
+    if (*it == key) { reservedKeys.erase(it); ++releases; return true; }
+  return false;
+}
+const char *commandJournalLastError() { return "already started"; }
 void tick(uint32_t ms = 1) { nowMs += ms; appLoop(); }
 void press(uint8_t pin) { levels[pin]=LOW; tick(); tick(BUTTON_DEBOUNCE_MS); }
 void release(uint8_t pin) { levels[pin]=HIGH; tick(); tick(BUTTON_DEBOUNCE_MS); }
@@ -199,7 +222,8 @@ int main() {
   assert(reservations==3); // No repeat reservation when third channel gets capacity.
 
   // A raw brief cancel stops every motor and cancels the waiting third channel.
-  resetCase(); acceptRound(); const size_t beforeCancel=pulses.size();
+  resetCase(); lcdTitle.clear(); acceptRound(); const size_t beforeCancel=pulses.size();
+  assert(lcdTitle=="DISPENSING PILLS");  // the big LCD says so before any motor moves
   levels[CANCEL_BUTTON_PIN]=LOW; tick();
   assert(!dispenserIsBusy() && pendingDoseCount==0 && savedEvents.size()==3);
   assert(dose(0).state==DoseState::Failed && dose(1).state==DoseState::Failed && dose(2).state==DoseState::Skipped);
@@ -227,4 +251,20 @@ int main() {
   assert(!snoozeRound());
   for (int i=0;i<3;++i) assert(dose(i).state==DoseState::Alerting);
   assert(skipRound()==3 && savedEvents.size()==3);
+
+  // Refused before any motion (plate 1 beam blocked at start): no pill can have come out, so
+  // the day lock is released and the dose can be accepted again once fixed. Before this fix
+  // the dose stayed "dose locked" all day although nothing was ever dispensed.
+  if (ENABLE_SERVO_MOVEMENT && ENABLE_PILL_SENSOR) {
+    resetCase(); releases=0;
+    levels[PILL_SENSOR_PINS[0]]=LOW;  // something sits in the beam
+    acceptRound();
+    assert(dose(0).state==DoseState::Failed && pulseCount(1)==0);
+    assert(releases==1);
+    for (const auto &k:reservedKeys) assert(k!="dose-1");
+    // Plates that did start keep their lock: pills may already be out.
+    assert(std::find(reservedKeys.begin(),reservedKeys.end(),"dose-2")!=reservedKeys.end());
+    levels[CANCEL_BUTTON_PIN]=LOW; tick(); levels[CANCEL_BUTTON_PIN]=HIGH;
+    levels[PILL_SENSOR_PINS[0]]=HIGH;
+  }
 }
