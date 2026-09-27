@@ -154,7 +154,7 @@ void handleConnect()
   if (connecting || completed || startPending) { reply(409, "กำลังตั้งค่า กรุณารอ"); return; }
   const String ssid = server.arg("ssid"), password = server.arg("password");
   if (!validSetupWifi(ssid.c_str(), password.c_str())) { reply(400, "ชื่อ Wi-Fi ต้องยาว 1–32 ไบต์ รหัสผ่าน 8–63 ตัว หรือว่างสำหรับเครือข่ายเปิด"); return; }
-  if (!normalizeSetupToken(server.arg("token").c_str(), setupToken)) { reply(400, "กรอกรหัสตั้งค่า 20 ตัวจากเว็บไซต์"); return; }
+  if (!normalizeSetupToken(server.arg("token").c_str(), setupToken)) { reply(400, "กรอกรหัสตั้งค่า 8 ตัวจากเว็บไซต์"); return; }
   if (!storageReady) { reply(503, "พื้นที่บันทึกตั้งค่าไม่พร้อม กรุณาเปิดเครื่องใหม่"); return; }
   candidate = {}; candidate.magic = WIFI_MAGIC;
   strcpy(candidate.ssid, ssid.c_str()); strcpy(candidate.password, password.c_str());
@@ -365,6 +365,11 @@ void wifiWebLoop()
           shortStatus = "PAIRED, DONE";
           message = "ตั้งค่าและจับคู่สำเร็จ กำลังปิด Wi-Fi Setup"; closeAt = millis() + 10000;
         }
+      } else if (code == 429) {
+        connecting = false; memset(setupToken, 0, sizeof(setupToken));
+        shortStatus = "RATE LIMITED";
+        message = "ลองรหัสบ่อยเกินไป กรุณารอ 5 นาที แล้วสร้างรหัสใหม่จากเว็บไซต์";
+        scheduleCloseAfterFailure();
       } else if (code == 400 || code == 401 || code == 403 || code == 404 || code == 409) {
         connecting = false; memset(setupToken, 0, sizeof(setupToken));
         shortStatus = code == 401 ? "BAD API KEY" : "PAIR FAILED";

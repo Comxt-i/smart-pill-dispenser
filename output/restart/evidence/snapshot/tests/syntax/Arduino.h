@@ -1,0 +1,118 @@
+// Stub สำหรับตรวจไวยากรณ์บนคอมพิวเตอร์เท่านั้น ไม่ใช่การจำลองพฤติกรรมของบอร์ด
+#pragma once
+
+// Tests that compile straight from ESP32_Main must not depend on whatever
+// hardware.local.h this machine has. (Tests that ship their own profile copy
+// config.h into a temp dir and use tests/stubs, which must NOT define this.)
+// config.h includes <Arduino.h> right before hardware_profile.h, so defining this
+// here makes every test deterministic; the real Arduino.h never defines it.
+#ifndef PILLBOX_IGNORE_LOCAL_PROFILE
+#define PILLBOX_IGNORE_LOCAL_PROFILE 1
+#endif
+
+#include <cstdarg>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <time.h>
+
+#define PROGMEM
+
+constexpr int LOW = 0;
+constexpr int HIGH = 1;
+constexpr int OUTPUT = 1;
+constexpr int INPUT = 0;
+constexpr int INPUT_PULLUP = 2;
+
+unsigned long millis();
+void delay(unsigned long ms);
+void delayMicroseconds(unsigned int us);
+void pinMode(uint8_t pin, uint8_t mode);
+int digitalRead(uint8_t pin);
+void digitalWrite(uint8_t pin, int value);
+
+/** พอสำหรับสิ่งที่ firmware ใช้: ต่อสตริง, แปลงตัวเลข, และอ่านค่ากลับเป็น C string */
+class String {
+ public:
+  String() {}
+  String(const char *value) : text(value ? value : "") {}
+  String(const std::string &value) : text(value) {}
+  String(int value) : text(std::to_string(value)) {}
+  String(long value) : text(std::to_string(value)) {}
+  String(unsigned value) : text(std::to_string(value)) {}
+  String(unsigned long value) : text(std::to_string(value)) {}
+  String(float value, int = 2) : text(std::to_string(value)) {}
+  String(double value, int = 2) : text(std::to_string(value)) {}
+
+  void replace(const char *from, const char *to) {
+    size_t pos = 0; while ((pos = text.find(from, pos)) != std::string::npos) { text.replace(pos, strlen(from), to); pos += strlen(to); }
+  }
+  const char *c_str() const { return text.c_str(); }
+  int toInt() const { return atoi(text.c_str()); }
+  float toFloat() const { return static_cast<float>(atof(text.c_str())); }
+  size_t length() const { return text.size(); }
+
+  String &operator+=(const String &other) {
+    text += other.text;
+    return *this;
+  }
+  String operator+(const String &other) const { return String(text + other.text); }
+
+  // String ของ Arduino จริงเทียบกันได้ทั้งกับ String และ const char*
+  bool operator==(const String &other) const { return text == other.text; }
+  bool operator!=(const String &other) const { return text != other.text; }
+  bool operator==(const char *other) const { return text == (other ? other : ""); }
+  String &operator=(const char *value) {
+    text = value ? value : "";
+    return *this;
+  }
+
+  std::string text;
+};
+
+inline String operator+(const char *left, const String &right) { return String(left) + right; }
+
+class Stream {
+ public:
+  int available() { return 0; }
+  int read() { return -1; }
+};
+
+class SerialClass : public Stream {
+ public:
+  void begin(unsigned long) {}
+  void println() {}
+  void printf(const char *, ...) {}
+
+  // Print ของ Arduino จริงรับได้ทั้ง Printable และชนิดตัวเลข จึงเปิดกว้างไว้แบบเดียวกัน
+  template <typename T>
+  void print(const T &) {}
+  template <typename T>
+  void println(const T &) {}
+};
+
+extern SerialClass Serial;
+
+class EspClass {
+ public:
+  uint64_t getEfuseMac() { return 0; }
+  uint32_t getFreeHeap() { return 0; }
+};
+
+extern EspClass ESP;
+
+void analogWrite(uint8_t pin, int value);
+long map(long x, long inMin, long inMax, long outMin, long outMax);
+
+// ของจริงเป็นมาโคร แต่เทมเพลตพอสำหรับตรวจไวยากรณ์และปลอดภัยกว่า
+template <typename T>
+T constrain(T value, T low, T high) {
+  return value < low ? low : (value > high ? high : value);
+}
+
+// ของจริงย้ายสตริงไป flash; บนเครื่องคอมพิวเตอร์ปล่อยผ่านได้เลย
+#define F(string_literal) (string_literal)
+
+constexpr uint8_t LED_BUILTIN = 13;

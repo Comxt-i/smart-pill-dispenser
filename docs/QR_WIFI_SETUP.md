@@ -5,7 +5,7 @@ This feature spans `embedded_project` (website/backend) and `smart-pill-dispense
 ## What the user does
 
 1. Scan the printed QR. It opens `https://YOUR-DOMAIN/setup/AA:BB:CC:DD:EE:FF` using the box’s registered station MAC. Old `/setup/DEVICE_ID` links still work.
-2. Register an account or log in while the phone still has internet. The website returns to that exact box. Click **สร้างรหัสตั้งค่า** to get a code valid for 15 minutes.
+2. Register an account or log in while the phone still has internet. The website returns to that exact box. Click **สร้างรหัสตั้งค่า** to get a code valid for 5 minutes.
 3. Copy the code. It tells the ESP32 which logged-in account to pair with; it is not a Wi-Fi password. Paste it into the box’s local portal in step 5. Keep this tab open.
 4. Connect the phone to `PillBox_XXXXXX`, using the setup-network password printed on the label. Select “stay connected” if the phone warns that the network has no internet.
 5. Open the captive portal, or type `http://192.168.4.1`. Select a 2.4 GHz home SSID, enter its password, paste the setup code and submit.
@@ -54,7 +54,7 @@ Only ADMIN accounts can print labels, for both paired and unpaired devices. Norm
 
 - Migrations: `backend/prisma/migrations/202609200001_device_setup/migration.sql` and `backend/prisma/migrations/202609210001_account_commands/migration.sql`. The second migration adds command ownership and backfills existing ownership without deleting medical history.
 - Run `prisma migrate deploy` before starting the new backend; the Docker entrypoint already does this.
-- Rebuild both web and backend images, then update the ESP32 firmware. Do not just copy new frontend assets onto an old backend.
+- For short codes, flash firmware **1.3.1 or newer first**, while the old backend still issues 20-character codes. Then apply migration `202609260001_short_setup_codes` and rebuild/deploy both backend and web. Older firmware cannot accept the new 8-character codes. Do not just copy new frontend assets onto an old backend.
 - Existing devices with `user_id = null` must complete pairing. Until then their sync slots are inactive and pending commands are withheld.
 - No migrations or secrets are applied to production by the local implementation/test commands.
 
@@ -70,7 +70,7 @@ All `/api/devices/...` setup routes require a user JWT. Setup info, label, issue
 | `GET /api/devices/:id/setup-session/:sessionId` | Return completion only to the issuing account |
 | `DELETE /api/devices/:id/pairing` | Release the caller's own device and disable its server-side operation |
 
-`POST /api/device/setup/complete` requires the **hardware X-API-Key**, and body `{ "token": "20_HEX_CHARACTERS" }`. The token is bound to the authenticated device and user, expires in 15 minutes and cannot take over another owner. Retries after a lost response are idempotent while the session/pairing is valid. Unpairing revokes even previously consumed sessions.
+`POST /api/device/setup/complete` requires the **hardware X-API-Key**, and body `{ "token": "ABCD-EFGH" }`. The token is bound to the authenticated device and user, expires in 5 minutes and cannot take over another owner. Retries after a lost response are idempotent while the session/pairing is valid. Unpairing revokes even previously consumed sessions.
 
 ## Validation
 
@@ -82,3 +82,23 @@ Firmware: `python3 -m unittest discover -s tests -p 'test_*.py'`. Includes real 
 Real ESP32 compilation also passed with Arduino ESP32 core 3.3.12 (`esp32:esp32:esp32`): 1,148,555 bytes flash (87%) and 58,172 bytes static RAM (17%). This compile used placeholder device credentials for validation; configure the real per-device credentials before flashing.
 
 Physical captive-portal behavior on iOS/Android, router compatibility, reboot persistence on flash, and QR scanning from the final printed sticker still need a real ESP32 and phone. No hardware was flashed by these checks.
+
+## Short setup codes (firmware 1.3.1)
+
+New tickets contain 8 characters from `23456789ABCDEFGHJKMNPQRSTUVWXYZ` (no 0/O or 1/I/L).
+The website displays them as `ABCD-EFGH`; copying returns the raw 8 characters.
+Both firmware and backend accept lowercase, whitespace and hyphens. Tickets expire after 5 minutes.
+Existing 20-character hex tickets are accepted until their original expiry, for deployment compatibility.
+The Wi-Fi password shown on the LCD and printed label is unchanged.
+
+Server quotas are stored in PostgreSQL, so they survive process restarts and apply across workers:
+
+- Code issuance: 1 request per 60 seconds per device, and 3 per 5 minutes per account.
+- Code verification: 5 requests per 5 minutes per authenticated device, including successful requests/retries.
+- Exceeding a quota returns HTTP 429 with `retry_after_seconds`; invalid codes still consume verification quota.
+- The website shows a retry countdown. Firmware stops automatic setup retries on 429 and asks the user to wait before obtaining a new code.
+- Migration `202609260001_short_setup_codes` creates the `SetupRateLimit` table only; it does not delete pairing or medical history.
+
+Validation: backend setup tests, production HTTP checks, firmware setup state-machine tests,
+and an isolated PostgreSQL concurrency test (`test/setup-rate-limit-db.cjs`).
+The database test requires an explicitly supplied temporary Unix-socket database URL and never uses the application `DATABASE_URL`.

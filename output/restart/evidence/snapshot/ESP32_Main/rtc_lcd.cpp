@@ -1,0 +1,430 @@
+#include "rtc_lcd.h"
+#include "config.h"
+#include "marquee.h"
+#include "software_clock.h"
+
+#include <DS1307RTC.h>
+#include <LiquidCrystal_I2C.h>
+#include <TimeLib.h>
+#include <Wire.h>
+
+namespace {
+LiquidCrystal_I2C lcdTime(LCD_TIME_ADDRESS, LCD_TIME_COLS, LCD_TIME_ROWS);
+LiquidCrystal_I2C lcdMedicine(LCD_MEDICINE_ADDRESS, LCD_MEDICINE_COLS, LCD_MEDICINE_ROWS);
+
+tmElements_t currentTime;
+bool clockValid = false;
+SoftwareClock softwareClock;
+const char *clockSource = "WAITING";
+bool timeLcdPresent = false, medicineLcdPresent = false, rtcPresent = false;
+unsigned long lastRefreshMs = 0;
+
+// จำข้อความที่แสดงอยู่จริงของแต่ละบรรทัด เพื่อเขียนเฉพาะบรรทัดที่เปลี่ยน
+// การเขียนทับทุกบรรทัดทุกรอบทำให้จอกะพริบและกินเวลาบัส I2C โดยเปล่าประโยชน์
+char shownMedicine[LCD_MEDICINE_ROWS][LCD_MAX_COLS + 1] = {};
+char shownTime[LCD_TIME_ROWS][LCD_MAX_COLS + 1] = {};
+
+// แต่ละบรรทัดของจอยามีตัวเลื่อนข้อความเป็นของตัวเอง เลื่อนอิสระจากกัน
+Marquee lineMarquee[LCD_MEDICINE_ROWS] = {};
+uint8_t lineCount = 0;
+
+char hintLines[LCD_MAX_HINTS][LCD_MAX_COLS + 1] = {};
+uint8_t hintCount = 0;
+uint8_t hintIndex = 0;
+unsigned long lastHintSwapMs = 0;
+bool hintTimerStarted = false;
+
+// เก็บผลสแกน I2C ไว้ให้หน้าเว็บในเครื่องอ่าน จะได้ไล่ปัญหาโดยไม่ต้องเสียบ USB
+constexpr uint8_t I2C_MAX_FOUND = 8;
+uint8_t foundAddresses[I2C_MAX_FOUND] = {};
+uint8_t foundCount = 0;
+
+/** เติมช่องว่างให้เต็มความกว้างจอ เพื่อลบข้อความเดิมที่ยาวกว่าโดยไม่ต้อง clear ทั้งจอ */
+void printPadded(LiquidCrystal_I2C &lcd, uint8_t row, uint8_t cols, const char *text)
+{
+  if ((&lcd == &lcdTime && !timeLcdPresent) ||
+      (&lcd == &lcdMedicine && !medicineLcdPresent)) return;
+  char padded[LCD_MAX_COLS + 1];
+  snprintf(padded, sizeof(padded), "%-*.*s", cols, cols, text ? text : "");
+  lcd.setCursor(0, row);
+  lcd.print(padded);
+}
+
+/** เขียนบรรทัดเดียวเฉพาะเมื่อข้อความเปลี่ยนจริง */
+void writeLineIfChanged(LiquidCrystal_I2C &lcd,
+                        uint8_t row,
+                        uint8_t cols,
+                        char *shown,
+                        const char *text)
+{
+  if (strncmp(shown, text, LCD_MAX_COLS + 1) == 0)
+    return;
+
+  printPadded(lcd, row, cols, text);
+  strncpy(shown, text, LCD_MAX_COLS);
+  shown[LCD_MAX_COLS] = '\0';
+}
+
+}
+
+bool i2cScanAndReport()
+{
+  Serial.println("[I2C] กำลังสแกนบัส...");
+
+  bool foundTimeLcd = false;
+  bool foundMedicineLcd = false;
+  bool foundRtc = false;
+  uint8_t total = 0;
+  foundCount = 0;
+
+  for (uint8_t address = 1; address < 127; ++address)
+  {
+    Wire.beginTransmission(address);
+    if (Wire.endTransmission() != 0)
+      continue;
+
+    ++total;
+    if (foundCount < I2C_MAX_FOUND)
+      foundAddresses[foundCount++] = address;
+    Serial.printf("[I2C]   พบอุปกรณ์ที่ 0x%02X", address);
+
+    if (address == LCD_TIME_ADDRESS)
+    {
+      foundTimeLcd = true;
+      Serial.print("  <- จอเวลา");
+    }
+    else if (address == LCD_MEDICINE_ADDRESS)
+    {
+      foundMedicineLcd = true;
+      Serial.print("  <- จอยา");
+    }
+    else if (address == DS1307_ADDRESS)
+    {
+      foundRtc = true;
+      Serial.print("  <- DS1307");
+    }
+    Serial.println();
+  }
+
+  if (total == 0)
+    Serial.println("[I2C] ไม่พบอุปกรณ์เลย ตรวจสาย SDA/SCL, ไฟเลี้ยง และ Level Shifter");
+
+  if (!foundTimeLcd)
+    Serial.printf("[I2C] เตือน: ไม่พบจอเวลาที่ 0x%02X\n", LCD_TIME_ADDRESS);
+  if (!foundMedicineLcd)
+    Serial.printf("[I2C] เตือน: ไม่พบจอยาที่ 0x%02X\n", LCD_MEDICINE_ADDRESS);
+  if (!foundRtc)
+    Serial.println("[I2C] เตือน: ไม่พบ DS1307 ที่ 0x68 นาฬิกาจะไม่เดินต่อเมื่อไฟดับ");
+
+  timeLcdPresent = foundTimeLcd;
+  medicineLcdPresent = foundMedicineLcd;
+  rtcPresent = foundRtc;
+  const bool complete = foundTimeLcd && foundMedicineLcd && foundRtc;
+  if (complete)
+    Serial.println("[I2C] พบอุปกรณ์ครบตามที่ตั้งค่าไว้");
+  else
+    Serial.println("[I2C] อุปกรณ์ไม่ครบ ระบบยังทำงานต่อได้แต่บางส่วนจะไม่แสดงผล");
+
+  return complete;
+}
+
+I2cLineState lastLineState = {};
+
+namespace {
+/**
+ * ทดสอบว่าขานี้มี pull-up ภายนอกจริงไหม
+ *
+ * บังคับให้เป็น LOW เพื่อไล่ประจุตกค้างออกก่อน แล้วปล่อยเป็น input
+ * มี pull-up จริง -> เด้งกลับเป็น HIGH ภายในไม่กี่ไมโครวินาที
+ * ขาลอย -> ค้างอยู่ LOW เพราะไม่มีอะไรดึงขึ้น
+ */
+bool hasExternalPullup(uint8_t pin)
+{
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, LOW);
+  delayMicroseconds(200);
+
+  pinMode(pin, INPUT);  // ปล่อยลอย ไม่เปิด pull-up ภายใน
+  delayMicroseconds(50);
+
+  return digitalRead(pin) == HIGH;
+}
+
+/** ขาใช้งานได้ไหม: เปิด pull-up ภายในแล้วต้องเป็น HIGH ถ้ายัง LOW แปลว่าลัดลง GND */
+bool pinCanGoHigh(uint8_t pin)
+{
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, LOW);
+  delayMicroseconds(200);
+
+  pinMode(pin, INPUT_PULLUP);
+  delayMicroseconds(200);
+
+  return digitalRead(pin) == HIGH;
+}
+}
+
+I2cLineState i2cCheckLines()
+{
+  I2cLineState state;
+
+  state.sdaHighWithoutPullup = hasExternalPullup(I2C_SDA_PIN);
+  state.sclHighWithoutPullup = hasExternalPullup(I2C_SCL_PIN);
+  state.sdaHighWithPullup = pinCanGoHigh(I2C_SDA_PIN);
+  state.sclHighWithPullup = pinCanGoHigh(I2C_SCL_PIN);
+
+  lastLineState = state;
+
+  Serial.println("[I2C] ตรวจสภาพเส้นสัญญาณ (ดึงลง GND แล้วดูว่าเด้งกลับไหม)");
+  Serial.printf("[I2C]   SDA (GPIO%u): pull-up ภายนอก = %s, ขาใช้งานได้ = %s\n",
+                I2C_SDA_PIN,
+                state.sdaHighWithoutPullup ? "มี" : "ไม่มี",
+                state.sdaHighWithPullup ? "ใช่" : "ไม่ (ลัดลง GND)");
+  Serial.printf("[I2C]   SCL (GPIO%u): pull-up ภายนอก = %s, ขาใช้งานได้ = %s\n",
+                I2C_SCL_PIN,
+                state.sclHighWithoutPullup ? "มี" : "ไม่มี",
+                state.sclHighWithPullup ? "ใช่" : "ไม่ (ลัดลง GND)");
+
+  if (!state.sdaHighWithPullup || !state.sclHighWithPullup)
+    Serial.println("[I2C]   -> สายลัดลง GND หรือต่อผิดขา บัสใช้งานไม่ได้แน่นอน");
+  else if (!state.sdaHighWithoutPullup || !state.sclHighWithoutPullup)
+    Serial.println("[I2C]   -> ขาลอย ไม่มี pull-up ภายนอก (สายไม่ถึงโมดูล หรือ shifter ไม่ได้รับไฟ)");
+  else
+    Serial.println("[I2C]   -> มี pull-up ภายนอกจริง เส้นสัญญาณถึงโมดูลแล้ว");
+
+  return state;
+}
+
+I2cLineState i2cLastLineState()
+{
+  return lastLineState;
+}
+
+uint8_t i2cFoundCount()
+{
+  return foundCount;
+}
+
+uint8_t i2cFoundAddress(uint8_t index)
+{
+  return index < foundCount ? foundAddresses[index] : 0;
+}
+
+void rtcLcdBegin()
+{
+  if (timeLcdPresent) {
+    lcdTime.init();
+    lcdTime.backlight();
+    lcdTime.clear();
+  }
+  writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], "Smart Pill Box");
+  writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], "Starting...");
+
+  if (medicineLcdPresent) {
+    lcdMedicine.init();
+    lcdMedicine.backlight();
+    lcdMedicine.clear();
+  }
+  lcdShowMessage("Connecting", "Please wait...");
+}
+
+void rtcLcdUpdate()
+{
+  if (millis() - lastRefreshMs < 1000)
+    return;
+
+  lastRefreshMs = millis();
+
+  const uint32_t fallback = softwareClock.localEpoch(millis());
+  tmElements_t rtcTime = {};
+  const bool rtcRead = rtcPresent && RTC.read(rtcTime);
+  const bool rtcFieldsValid = rtcRead && rtcTime.Year >= 54 && rtcTime.Year < 130 &&
+      rtcTime.Month >= 1 && rtcTime.Month <= 12 && rtcTime.Day >= 1 && rtcTime.Day <= 31 &&
+      rtcTime.Hour < 24 && rtcTime.Minute < 60 && rtcTime.Second < 60;
+  const uint32_t rtcEpoch = rtcFieldsValid ? static_cast<uint32_t>(makeTime(rtcTime)) : 0;
+  const uint32_t drift = rtcEpoch > fallback ? rtcEpoch - fallback : fallback - rtcEpoch;
+  // A stale RTC that failed to accept the server time must not override it.
+  if (rtcRead && SoftwareClock::validEpoch(rtcEpoch) && (!fallback || drift <= 5)) {
+    currentTime = rtcTime;
+    softwareClock.sync(rtcEpoch, millis());
+    clockValid = true;
+    clockSource = "RTC";
+  } else if (SoftwareClock::validEpoch(fallback)) {
+    breakTime(fallback, currentTime);
+    clockValid = true;
+    clockSource = "SERVER";
+  } else {
+    clockValid = false;
+    clockSource = "WAITING";
+    writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], "WAIT FOR TIME");
+    writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], "CONNECT WI-FI");
+    return;
+  }
+
+  char line1[17];
+  char line2[17];
+  snprintf(line1,
+           sizeof(line1),
+           "%02d/%02d/%04d",
+           currentTime.Day,
+           currentTime.Month,
+           tmYearToCalendar(currentTime.Year));
+  snprintf(line2,
+           sizeof(line2),
+           "%02d:%02d:%02d%s",
+           currentTime.Hour,
+           currentTime.Minute,
+           currentTime.Second,
+           strcmp(clockSource, "RTC") == 0 ? "" : "  NO BAT");
+
+  writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], clockValid ? line1 : "SET CLOCK FIRST");
+  writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], line2);
+}
+
+void rtcSyncFromEpoch(uint32_t localEpoch)
+{
+  if (!SoftwareClock::validEpoch(localEpoch)) return;
+  const uint32_t previous = rtcLocalEpoch();
+  const uint32_t drift = previous > localEpoch ? previous - localEpoch : localEpoch - previous;
+  const bool wasUsingRtc = strcmp(clockSource, "RTC") == 0;
+  softwareClock.sync(localEpoch, millis());
+  breakTime(localEpoch, currentTime);
+  clockValid = true;
+  clockSource = "SERVER";
+  if (rtcPresent) {
+    if ((wasUsingRtc && drift <= 2) || RTC.write(currentTime)) {
+      clockSource = "RTC";
+    } else {
+      Serial.println("[Clock] RTC write failed; continuing with server time");
+    }
+  }
+  if (!previous)
+    Serial.printf("[Clock] Time ready via %s\n", clockSource);
+}
+
+bool rtcIsPresent() { return rtcPresent; }
+
+bool rtcOscillatorHalted()
+{
+  // บิต 7 ของรีจิสเตอร์ 0x00 คือ CH (Clock Halt)
+  // ตั้งอยู่ = ออสซิลเลเตอร์ไม่เดิน ซึ่งเป็นสถานะตั้งต้นเมื่อไฟหมดโดยไม่มีถ่านสำรอง
+  //
+  // DS1307RTC.read() คืน false เมื่อบิตนี้ตั้งอยู่ ทำให้แยกไม่ออกระหว่าง
+  // "ชิปหาย" กับ "ชิปอยู่แต่นาฬิกาหยุด" ซึ่งสองอย่างนี้แก้คนละวิธีกันคนละเรื่อง
+  if (!rtcPresent) return false;
+
+  Wire.beginTransmission(DS1307_ADDRESS);
+  Wire.write(static_cast<uint8_t>(0x00));
+  if (Wire.endTransmission() != 0) return false;
+  if (Wire.requestFrom(static_cast<int>(DS1307_ADDRESS), 1) != 1) return false;
+
+  return (Wire.read() & 0x80) != 0;
+}
+
+const char *rtcClockSource() { return clockSource; }
+
+bool rtcIsValid()
+{
+  return clockValid;
+}
+
+int rtcMinutesOfDay()
+{
+  if (!clockValid)
+    return -1;
+  return currentTime.Hour * 60 + currentTime.Minute;
+}
+
+uint32_t rtcDayKey()
+{
+  if (!clockValid)
+    return 0;
+  return static_cast<uint32_t>(tmYearToCalendar(currentTime.Year)) * 10000UL +
+         static_cast<uint32_t>(currentTime.Month) * 100UL + currentTime.Day;
+}
+
+uint32_t rtcLocalEpoch()
+{
+  if (!clockValid)
+    return 0;
+  return softwareClock.localEpoch(millis());
+}
+
+void lcdSetMedicineScreen(const char *const *lines,
+                          uint8_t count,
+                          const char *const *hints,
+                          uint8_t newHintCount)
+{
+  if (count > LCD_MEDICINE_ROWS)
+    count = LCD_MEDICINE_ROWS;
+  if (newHintCount > LCD_MAX_HINTS)
+    newHintCount = LCD_MAX_HINTS;
+
+  lineCount = count;
+  for (uint8_t i = 0; i < LCD_MEDICINE_ROWS; ++i)
+    marqueeSet(lineMarquee[i], i < count ? lines[i] : "", LCD_MEDICINE_COLS);
+
+  // ตรวจว่าชุดคำแนะนำเปลี่ยนจริงไหม ถ้าเหมือนเดิมต้องไม่รีเซ็ตจังหวะการสลับ
+  bool changed = newHintCount != hintCount;
+  for (uint8_t i = 0; i < newHintCount && !changed; ++i)
+    changed = strncmp(hintLines[i], hints[i] ? hints[i] : "", LCD_MAX_COLS + 1) != 0;
+
+  if (!changed)
+    return;
+
+  hintCount = newHintCount;
+  for (uint8_t i = 0; i < newHintCount; ++i)
+  {
+    strncpy(hintLines[i], hints[i] ? hints[i] : "", LCD_MAX_COLS);
+    hintLines[i][LCD_MAX_COLS] = '\0';
+  }
+
+  hintIndex = 0;
+  hintTimerStarted = false;
+}
+
+void lcdShowMessage(const char *line1, const char *line2)
+{
+  const char *lines[1] = {line1};
+  const char *hints[1] = {line2};
+  lcdSetMedicineScreen(lines, 1, hints, 1);
+}
+
+void lcdMedicineTick()
+{
+  if (!medicineLcdPresent) return;
+  const unsigned long now = millis();
+
+  if (!hintTimerStarted)
+  {
+    hintTimerStarted = true;
+    lastHintSwapMs = now;
+  }
+
+  if (hintCount > 1 && now - lastHintSwapMs >= LCD_HINT_INTERVAL_MS)
+  {
+    lastHintSwapMs = now;
+    hintIndex = static_cast<uint8_t>((hintIndex + 1) % hintCount);
+  }
+
+  constexpr uint8_t LAST_ROW = LCD_MEDICINE_ROWS - 1;
+
+  for (uint8_t row = 0; row < LCD_MEDICINE_ROWS; ++row)
+  {
+    char text[LCD_MAX_COLS + 1];
+
+    // บรรทัดสุดท้ายถูกจองไว้ให้คำแนะนำปุ่มสลับไปมา ถ้ามีคำแนะนำอยู่
+    if (row == LAST_ROW && hintCount > 0)
+      snprintf(text,
+               sizeof(text),
+               "%-*.*s",
+               LCD_MEDICINE_COLS,
+               LCD_MEDICINE_COLS,
+               hintLines[hintIndex]);
+    else
+      marqueeRender(lineMarquee[row], now, text);
+
+    writeLineIfChanged(lcdMedicine, row, LCD_MEDICINE_COLS, shownMedicine[row], text);
+  }
+}
+

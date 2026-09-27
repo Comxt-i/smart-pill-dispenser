@@ -1,0 +1,375 @@
+#pragma once
+
+#include <Arduino.h>
+#include "hardware_profile.h"
+
+constexpr uint8_t I2C_SDA_PIN = 21;
+constexpr uint8_t I2C_SCL_PIN = 22;
+
+// ---------------------------------------------------------------------------
+// จอ LCD สองจอ
+// ---------------------------------------------------------------------------
+//
+// จอเล็ก = นาฬิกา (วันที่ + เวลาปัจจุบัน)
+// จอใหญ่ = ตารางยา (บรรทัดละ 1 ช่อง + เวลามื้อถัดไป)
+//
+// ถ้าจอสลับหน้าที่กัน ให้สลับ **เฉพาะค่า ADDRESS** ของสองชุดนี้
+// ส่วน COLS/ROWS ไม่ต้องแตะ เพราะมันบอกขนาดของจอที่ทำหน้าที่นั้น ไม่ได้ผูกกับ address
+
+// จอเล็ก 16x2 = นาฬิกา
+// ที่อยู่ของ DS1307 ตรึงมาจากโรงงาน ไม่มีขาเลือก เปลี่ยนไม่ได้
+constexpr uint8_t DS1307_ADDRESS = 0x68;
+
+constexpr uint8_t LCD_TIME_ADDRESS = 0x25;
+constexpr uint8_t LCD_TIME_COLS = 16;
+constexpr uint8_t LCD_TIME_ROWS = 2;
+
+// จอใหญ่ 20x4 = ตารางยา
+constexpr uint8_t LCD_MEDICINE_ADDRESS = 0x27;
+constexpr uint8_t LCD_MEDICINE_COLS = 20;
+constexpr uint8_t LCD_MEDICINE_ROWS = 4;
+
+// ขนาด buffer ต้องรองรับจอที่กว้างที่สุด
+constexpr uint8_t LCD_MAX_COLS = 20;
+
+// ข้อความที่ยาวเกินจอจะเลื่อนวน: ขยับทีละตัวอักษรทุก STEP และหยุดพักที่ต้นข้อความทุก HOLD
+constexpr unsigned long LCD_MARQUEE_STEP_MS = 320;
+constexpr unsigned long LCD_MARQUEE_HOLD_MS = 1600;
+// ความยาวข้อความสูงสุดที่เก็บได้ (ชื่อยาหลายตัวต่อกัน)
+constexpr uint8_t LCD_MARQUEE_MAX_TEXT = 80;
+
+// บรรทัดสุดท้ายสลับระหว่างข้อมูลมื้อยากับคำแนะนำปุ่ม ทุกกี่มิลลิวินาที
+constexpr unsigned long LCD_HINT_INTERVAL_MS = 2200;
+// จำนวนข้อความที่สลับได้บนบรรทัดสุดท้าย
+constexpr uint8_t LCD_MAX_HINTS = 4;
+
+// โชว์หน้าวินิจฉัยตอนบูตนานเท่าไร (I2C, RTC, Wi-Fi ที่จำไว้, สาเหตุรีเซ็ต) ตั้ง 0 เพื่อปิด
+// มีไว้ไล่ปัญหาโดยไม่ต้องต่อ Serial เพราะการดู Serial ต้องถอด adapter แล้วจอจะดับ
+constexpr unsigned long BOOT_REPORT_SCREEN_MS = 4000;
+
+// Pin map for a classic ESP32 DevKit / ESP32-WROOM-32.
+constexpr uint8_t DISPENSER_COUNT = 3;
+constexpr uint8_t SERVO_PINS[DISPENSER_COUNT] = {18, 19, 23};
+
+// Keep motion disabled until calibrated without pills.
+constexpr bool ENABLE_SERVO_MOVEMENT = PILLBOX_REAL_HARDWARE;
+
+/**
+ * โหมดทดสอบระบบทั้งวงจรโดยที่ยังไม่ได้ต่อ Servo
+ *
+ * เมื่อ ENABLE_SERVO_MOVEMENT เป็น false ปกติการกดปุ่มรับยาจะถูกปฏิเสธและรายงานเป็น FAILED
+ * ทำให้ทดสอบเส้นทาง "กดปุ่ม -> บันทึกขึ้น server" ไม่ได้
+ *
+ * ตั้งค่านี้เป็น true จะถือว่าการกดปุ่มสำเร็จทันทีโดยไม่ขยับอะไร และ**ระบุไว้ในบันทึกว่า
+ * เป็นการทดสอบ** (note = "dry run") เพื่อไม่ให้ประวัติการจ่ายยาหลอกว่าเม็ดยาออกมาจริง
+ *
+ * ต้องตั้งกลับเป็น false เมื่อต่อ Servo แล้ว
+ */
+constexpr bool DISPENSE_DRY_RUN = !ENABLE_SERVO_MOVEMENT;
+// SG92R 270 องศาใช้พัลส์ 500-2500us เต็มพิสัย (ราว 7.4us ต่อองศา)
+// ช่วงเดิม 1000-2000 ได้แค่ราว 135 องศารวมสองข้าง ไปไม่ถึงช่องที่ 135 องศาเลย
+constexpr int SERVO_MIN_PULSE_US = 500;
+constexpr int SERVO_MAX_PULSE_US = 2500;
+constexpr int REST_PULSE_US[DISPENSER_COUNT] = PILLBOX_REST_PULSES;
+
+// ช่องปล่อยยาบนจาน 4 ช่อง เรียงจากเล็กไปใหญ่ ตรงกับตัวเลือก "รูปทรงและขนาดเม็ดยา" บนเว็บ
+//   0 = กลม ไม่เกิน 8 mm         หมุนขวา  90 องศา
+//   1 = กลม ไม่เกิน 13 mm        หมุนขวา 135 องศา
+//   2 = กลม ไม่เกิน 15 mm        หมุนซ้าย  90 องศา
+//   3 = รี/แคปซูล ไม่เกิน 25 mm  หมุนซ้าย 135 องศา
+// ค่าพัลส์จริงของแต่ละช่องมาจากการสอบเทียบ (examples/ServoCalibrate) ใส่ใน hardware.local.h
+constexpr uint8_t PILL_HOLE_COUNT = 4;
+constexpr int8_t PILL_HOLE_ANY = -1;  // ผู้ใช้ไม่ได้ระบุขนาดยา
+constexpr int HOLE_PULSE_US[DISPENSER_COUNT][PILL_HOLE_COUNT] = PILLBOX_HOLE_PULSES;
+constexpr unsigned long MOVE_TIME_MS = PILLBOX_MOVE_TIME_MS;
+static_assert(MOVE_TIME_MS > 0 && MOVE_TIME_MS <= 5000, "Invalid servo travel time");
+
+// เขียนแบบเรียกตัวเองเพราะเทสต์บางชุดคอมไพล์ด้วย C++11 ซึ่งห้ามใช้ลูปใน constexpr
+constexpr bool pulseWithinLimits(int us) { return us >= SERVO_MIN_PULSE_US && us <= SERVO_MAX_PULSE_US; }
+constexpr bool restPulsesValid(unsigned d)
+{
+  return d >= DISPENSER_COUNT || (pulseWithinLimits(REST_PULSE_US[d]) && restPulsesValid(d + 1));
+}
+constexpr bool holePulsesValid(unsigned d, unsigned h)
+{
+  return d >= DISPENSER_COUNT ? true
+       : h >= PILL_HOLE_COUNT ? holePulsesValid(d + 1, 0)
+       : pulseWithinLimits(HOLE_PULSE_US[d][h]) && HOLE_PULSE_US[d][h] != REST_PULSE_US[d] &&
+         holePulsesValid(d, h + 1);
+}
+static_assert(restPulsesValid(0) && holePulsesValid(0, 0),
+              "Servo calibration exceeds pulse limits, or a hole sits at the rest position");
+
+// ---------------------------------------------------------------------------
+// มอเตอร์สั่น (DRV8833)
+// ---------------------------------------------------------------------------
+//
+// IN1 = ขา PWM คุมความแรงสั่น, IN2 = ขาทิศทาง/เบรก
+// DRV8833 หนึ่งบอร์ดมี 2 ช่อง จึงต้องใช้ **สองบอร์ด** สำหรับสามจาน
+// ขา SLP/nSLEEP ของทุกบอร์ดต้องเป็น HIGH และ GND ต้องต่อร่วมกับ ESP32
+//
+// GPIO14 ปล่อยสัญญาณคล็อกออกมาเองตอนบูตตามปกติของชิป
+// กับ DRV8833 นั่นแปลว่า IN2=HIGH ขณะที่ IN1 ยังลอย = มอเตอร์จาน 3 วิ่งเต็มกำลัง
+// และจะวิ่งค้างจนกว่าจะมีคนเขียนขาให้เป็น LOW จึงต้องเรียก dispenserSafePinsEarly()
+// เป็นคำสั่งแรกสุดของ setup() ห้ามย้ายไปไว้ทีหลัง
+//
+// ถ้าอยากตัดปัญหาถาวร: ถอดสาย GPIO14 ออกแล้วต่อขา IN2 ของจาน 3 ลง GND แทน
+// จะเสียแค่การเบรกมอเตอร์ตอนหมุนกลับ ซึ่งปล่อยให้หมุนฟรีก็ได้ ไม่กระทบการจ่ายยา
+constexpr uint8_t VIB_PWM_PINS[DISPENSER_COUNT] = {13, 26, 4};
+constexpr uint8_t VIB_DIR_PINS[DISPENSER_COUNT] = {16, 17, 14};
+
+// ความแรงสั่น 0-255 (ช่วงที่ใช้ได้จริงราว 60-130)
+// มอเตอร์สั่นส่วนใหญ่เป็นรุ่น 3V ถ้าจ่ายไฟมอเตอร์ 5V ต้องไม่เกินราว 150
+constexpr uint8_t VIB_SPEED = 70;
+// กระตุกเต็มกำลังสั้นๆ ให้ตุ้มถ่วงออกตัว แล้วผ่อนลงมาที่ VIB_SPEED
+constexpr uint8_t VIB_KICK_SPEED = 255;
+constexpr unsigned long VIB_KICK_MS = 40;
+
+// เขย่าอยู่กับที่หลังหมุนกลับถึงตำแหน่งพักนานเท่าไร
+// จำเป็นเพราะบางครั้งเม็ดยาหลุดจากจานแล้วแต่ยังค้างอยู่ด้านล่าง การหมุนอย่างเดียวไม่ทำให้มันตก
+constexpr unsigned long SHAKE_TIME_MS = 600;
+
+// ---------------------------------------------------------------------------
+// เซ็นเซอร์ IR ตรวจเม็ดยาที่ตกลงมา (จานละหนึ่งตัว)
+// ---------------------------------------------------------------------------
+//
+// ตั้ง false ถ้ายังไม่ได้ต่อเซ็นเซอร์ ระบบจะกลับไปหมุนตามจำนวนเม็ดที่สั่งแบบไม่ตรวจสอบ
+// และติดป้าย "unverified" ไว้ในบันทึก เพื่อไม่ให้ประวัติหลอกว่ายืนยันเม็ดจริง
+constexpr bool ENABLE_PILL_SENSOR = PILLBOX_PILL_SENSOR;
+// จ่ายยาจริงต้องมีเซ็นเซอร์ยืนยัน เว้นแต่จะประกาศสละการยืนยันไว้ใน hardware.local.h
+// อย่างจงใจ ซึ่งกรณีนั้นบันทึกทุกรายการจะถูกติดป้าย unverified
+static_assert(!ENABLE_SERVO_MOVEMENT || ENABLE_PILL_SENSOR || PILLBOX_ALLOW_UNVERIFIED_DISPENSE,
+              "Real dispensing requires pill sensors, or PILLBOX_ALLOW_UNVERIFIED_DISPENSE");
+
+// GPIO34-39 เป็นขาอินพุตอย่างเดียวและ **ไม่มี pull-up ในตัวชิป**
+// โมดูล IR ต้องขับสัญญาณเองแบบ push-pull ไม่อย่างนั้นต้องใส่ pull-up ภายนอก 10k
+constexpr uint8_t PILL_SENSOR_PINS[DISPENSER_COUNT] = {34, 35, 36};
+
+// โมดูล IR ส่วนใหญ่ให้เอาต์พุต LOW เมื่อลำแสงถูกบัง
+constexpr bool PILL_SENSOR_ACTIVE_LOW = true;
+
+// หลังนับหนึ่งเม็ดแล้วไม่รับสัญญาณใหม่นานเท่านี้
+// กันเม็ดเดียวที่กระเด้งหรือหมุนตัวผ่านลำแสงถูกนับหลายครั้ง
+// ถ้าตั้งยาวเกินไปจะนับตกเมื่อเม็ดตกติดกันเร็วๆ
+constexpr unsigned long PILL_DETECT_LOCKOUT_MS = 60;
+
+// ลองหมุน-เขย่าได้กี่รอบติดกันที่ช่องเดียวโดยไม่มีเม็ดตก ก่อนย้ายไปช่องถัดไป
+// ครบทุกช่องแล้วยังไม่ได้ = บันทึกว่าจ่ายไม่ครบ ให้ผู้ใช้กดลองใหม่
+//
+// ต้องมีเซ็นเซอร์ IR เท่านั้น ถ้าไม่มี เครื่องไม่รู้ว่ายาตกหรือยัง จึงหมุนแค่หนึ่งรอบต่อเม็ด
+// ที่ช่องแรก (วนหาช่องโดยไม่มีเซ็นเซอร์อาจเทยาออกมาหลายสิบเม็ด)
+constexpr uint8_t ATTEMPTS_PER_HOLE = 10;
+
+// ---------------------------------------------------------------------------
+// การจ่ายยาหลายช่องพร้อมกัน
+// ---------------------------------------------------------------------------
+//
+// รอบยาหนึ่งรอบอาจมียาหลายช่อง ผู้ใช้กดปุ่มเขียวครั้งเดียวแล้วจ่ายให้ครบทั้งรอบ
+// ช่องที่เกินเพดานนี้จะเข้าคิวรอจนมีช่องว่าง
+//
+// ทำไมต้องจำกัด: servo หนึ่งตัวกินกระแสพีคราว 700mA และมอเตอร์สั่นอีก 200mA
+// สองชุดพร้อมกัน = ~2.1A ซึ่งอะแดปเตอร์ 3A รับได้ แต่สามชุด = ~3A จะเริ่มเสี่ยง
+// ไฟตกจนแรงบิดหายและจานหมุนไม่สุด
+constexpr uint8_t MAX_CONCURRENT_DISPENSERS = 2;
+
+// งบกระแสที่กันไว้ให้ชุดจ่ายยาโดยเฉพาะ (mA)
+// = กำลังของอะแดปเตอร์ หักส่วนของ ESP32 (~250) จอสองจอกับ RTC (~80) และเผื่อไว้อีกเล็กน้อย
+constexpr uint16_t DISPENSER_CURRENT_BUDGET_MA = 2000;
+
+// กระแสพีคของหนึ่งชุดตอนออกตัว: servo SG92R ~700mA + มอเตอร์สั่นตอนกระตุก ~200mA
+constexpr uint16_t PEAK_MA_PER_DISPENSER = 900;
+
+// ผูกเพดานเข้ากับงบกระแสจริง ไม่ใช่ตัวเลขลอยๆ
+// ใครจะเพิ่มเพดานต้องเพิ่มงบด้วย ซึ่งแปลว่าต้องเปลี่ยนอะแดปเตอร์จริงๆ ไม่ใช่แก้เลขผ่านไป
+static_assert(MAX_CONCURRENT_DISPENSERS >= 1 &&
+                  MAX_CONCURRENT_DISPENSERS <= DISPENSER_COUNT,
+              "MAX_CONCURRENT_DISPENSERS ต้องอยู่ระหว่าง 1 ถึงจำนวนจานทั้งหมด");
+static_assert(MAX_CONCURRENT_DISPENSERS * PEAK_MA_PER_DISPENSER <=
+                  DISPENSER_CURRENT_BUDGET_MA,
+              "เพดานการจ่ายพร้อมกันเกินงบกระแสที่แหล่งจ่ายรับไหว "
+              "ต้องเปลี่ยนอะแดปเตอร์แล้วปรับ DISPENSER_CURRENT_BUDGET_MA ก่อน");
+
+// หน่วงชุดที่สองก่อนออกตัว เพื่อไม่ให้กระแสพุ่งตอนออกตัวของสอง servo ซ้อนกันพอดี
+// ชุดแรกจะผ่านช่วงกระแสพุ่งไปก่อนแล้วชุดที่สองจึงเริ่ม
+constexpr unsigned long DISPENSE_STAGGER_MS = 250;
+
+// ขา IN ของ buzzer เป็นอินพุตความต้านทานสูง จึงอยู่บน strapping pin ได้
+// (ต่างจาก LED ที่ต่อลง GND แล้วหนีบแรงดันขาจนบูตไม่ขึ้น)
+// ย้ายมาจาก GPIO25 เพื่อเปิดทางให้ไฟสถานะสีแดง
+//
+// GPIO15 มี pull-up ในตัวตอนบูต buzzer จึงอาจร้องสั้นๆ หนึ่งครั้งก่อน setup() รัน
+constexpr uint8_t BUZZER_PIN = 15;
+
+// ---------------------------------------------------------------------------
+// โมดูลไฟสถานะ 3 ดวง แดง/เหลือง/เขียว (common cathode: ขา G Y R GND)
+// ---------------------------------------------------------------------------
+//
+// ต่อ GND ของโมดูลเข้า GND ร่วม ส่วนอีกสามขาเข้า GPIO ตรงๆ
+// โมดูลส่วนใหญ่มีตัวต้านทานจำกัดกระแสมาให้บนบอร์ดแล้ว ถ้าไม่มีต้องใส่เอง 220-330 โอห์ม
+//
+// ตั้ง false เมื่อยังไม่ได้ต่อโมดูล หรือโมดูลเสีย
+// โค้ดจะไม่แตะขาทั้งสามเลย GPIO2 จึงกลับไปเป็นไฟบนบอร์ดตามปกติ ส่วน 25 กับ 5 ว่างให้ใช้อย่างอื่น
+constexpr bool ENABLE_STATUS_LED = true;
+
+// ***ห้ามใช้ GPIO12 เด็ดขาด***
+//
+// GPIO12 (MTDI) เป็นตัวเลือกแรงดันแฟลชตอนรีเซ็ต: LOW = 3.3V, HIGH = 1.8V
+// ถ้าเป็น HIGH ตอนบูต ชิปจะอ่านแฟลชไม่ออกแล้ววนบูตไม่จบ โดยขึ้น
+//   rst:0x10 (RTCWDT_RTC_RESET) / invalid header: 0xffffffff
+// ต่อให้คิดว่า LED จะดึงขาให้ต่ำเอง ก็ไม่ควรเสี่ยงกับขาที่พังแล้วพังทั้งบอร์ด
+//
+// GPIO5 ปล่อยพัลส์สั้นๆ ตอนบูตเหมือนกัน ไฟเขียวจึงอาจกะพริบหนึ่งครั้งตอนเปิดเครื่อง
+// แต่ไม่กระทบการบูต เพราะ strapping ของมันคุมจังหวะ SDIO slave ซึ่งไม่ได้ใช้ตอนบูตจากแฟลช
+constexpr uint8_t STATUS_LED_PINS[3] = {25, 2, 5};  // แดง, เหลือง, เขียว
+
+// false = common cathode (ขาร่วมลง GND, ขับขาสีเป็น HIGH เพื่อให้ติด) — พบบ่อยสุด
+// true  = common anode  (ขาร่วมเข้า 3.3V, ขับขาสีเป็น LOW เพื่อให้ติด)
+//
+// ถ้าต่อครบแล้วไฟไม่ติดเลยสักดวงทั้งที่ทดสอบด้วยการจั๊มไฟแล้วติด ให้สลับค่านี้
+constexpr bool STATUS_LED_ACTIVE_LOW = false;
+
+// ไฟเตือน: กระพริบพร้อมกันทุกดวง ติด/ดับอย่างละเท่านี้
+constexpr unsigned long STATUS_LED_BLINK_MS = 400;
+// ไฟตอนจ่ายยา: วิ่งไล่จากแดงไปเขียว เปลี่ยนดวงทุกเท่านี้
+constexpr unsigned long STATUS_LED_CHASE_MS = 180;
+// กดปุ่มแล้วโชว์สีนั้นค้างไว้นานเท่านี้ก่อนกลับไปแสดงสถานะปกติ
+constexpr unsigned long STATUS_LED_FLASH_MS = 600;
+
+// ตอนเปิดเครื่องไล่ไฟทีละดวงเพื่อพิสูจน์ว่าต่อครบ ดวงละกี่มิลลิวินาที
+constexpr unsigned long STATUS_LED_SELFTEST_MS = 200;
+// โมดูลปุ่ม 3 ตัว: จ่ายไฟ VCC ด้วย 3.3V เท่านั้น (5V จะทำให้ GPIO เสียหาย)
+// ทุกปุ่มเป็น active-LOW คือกดแล้วดึงขาลง GND
+constexpr uint8_t DISPENSE_BUTTON_PIN = 33;  // K3 ปุ่มเขียว = รับยา
+constexpr uint8_t SNOOZE_BUTTON_PIN = 32;    // K2 ปุ่มเหลือง = เลื่อนไปอีก 5 นาที
+constexpr uint8_t CANCEL_BUTTON_PIN = 27;    // K1 ปุ่มแดง  = ข้ามมื้อนี้
+
+// กดปุ่มเขียวค้าง 3 วินาทีเพื่อเข้า Wi-Fi Setup ขณะกลไกว่าง หรือขณะเปิดเครื่อง
+//
+// กดสั้นแล้วปล่อย = รับยา; กดค้าง = Setup โดยไม่จ่ายยา
+// ตรวจท่ากดค้างตอนบูตแยกไว้ด้วยเพื่อให้เข้า Setup ได้ก่อนเริ่มระบบ
+// อีกสองปุ่มมีท่าของตัวเองอยู่แล้ว (แดงกดค้าง = หยุดฉุกเฉิน, เหลือง = สั่ง sync ทันที)
+constexpr uint8_t CONFIRM_BUTTON_PIN = DISPENSE_BUTTON_PIN;
+
+// ---------------------------------------------------------------------------
+// Wi-Fi ที่เครื่องปล่อยเองตอนเข้าโหมดตั้งค่า (กดปุ่มเขียวค้าง 3 วินาทีตอนเปิดเครื่อง)
+// ---------------------------------------------------------------------------
+//
+// true  = ใช้ชื่อและรหัสที่กำหนดไว้ด้านล่าง พิมพ์แปะข้างกล่องได้เลย
+// false = คำนวณจาก DEVICE_API_KEY ให้ไม่ซ้ำกันรายเครื่อง (ต้องเปิด Serial ดูชื่อ)
+//
+// ข้อแลกเปลี่ยนของการกำหนดเอง: ทุกกล่องใช้รหัสเดียวกัน ใครรู้จากกล่องหนึ่งก็เข้าได้ทุกกล่อง
+// และคนที่อยู่บน AP เดียวกันดักรหัส Wi-Fi บ้านที่ผู้ใช้กำลังกรอกได้ เพราะหน้า setup เป็น HTTP
+// ยังมีรหัสตั้งค่าจากเว็บกั้นอีกชั้น การจับคู่จึงยังทำไม่ได้ถ้าไม่มีรหัสนั้น
+constexpr bool SETUP_AP_FIXED_CREDENTIALS = false;
+
+// ต้องไม่เกิน 31 ตัวอักษรตามข้อกำหนดของ SSID
+constexpr char SETUP_AP_SSID[] = "SmartPill_Setup";
+
+// WPA2 บังคับ 8-63 ตัวอักษร ถ้าสั้นกว่านี้ softAP จะเปิดไม่ผ่านหรือกลายเป็นเครือข่ายเปิด
+constexpr char SETUP_AP_PASSWORD[] = "pillbox1234";
+
+static_assert(sizeof(SETUP_AP_SSID) - 1 >= 1 && sizeof(SETUP_AP_SSID) - 1 <= 31,
+              "SETUP_AP_SSID ต้องยาว 1-31 ตัวอักษร");
+static_assert(sizeof(SETUP_AP_PASSWORD) - 1 >= 8 && sizeof(SETUP_AP_PASSWORD) - 1 <= 63,
+              "SETUP_AP_PASSWORD ต้องยาว 8-63 ตัวอักษรตามข้อกำหนดของ WPA2");
+
+// ความยาวรหัสผ่านของ AP แบบคำนวณเอง นับเป็นไบต์ (ออกมาเป็น hex สองตัวอักษรต่อไบต์)
+//
+// 4 ไบต์ = 8 ตัวอักษร ซึ่งเป็นความยาวต่ำสุดที่ WPA2 ยอมรับพอดี
+// สั้นลงจากเดิม 16 ตัว เพื่อให้ผู้ใช้อ่านจากจอแล้วพิมพ์ตามได้โดยไม่ผิด
+constexpr uint8_t SETUP_AP_PASSWORD_BYTES = 4;
+static_assert(SETUP_AP_PASSWORD_BYTES * 2 >= 8 && SETUP_AP_PASSWORD_BYTES * 2 <= 63,
+              "รหัสผ่าน AP แบบคำนวณเองต้องยาว 8-63 ตัวอักษรตามข้อกำหนดของ WPA2");
+
+// โหมดตั้งค่าปิดการเตือนและการจ่ายยาทั้งหมด จึงต้องไม่ค้างอยู่นานโดยไม่จำเป็น
+//
+// หลังต่อ Wi-Fi สำเร็จแต่จับคู่บัญชีไม่ผ่าน รอให้ผู้ใช้อ่านผลบนมือถือก่อนแล้วปิดเอง
+constexpr unsigned long SETUP_RESULT_GRACE_MS = 20000;
+// ไม่มีมือถือเปิดหน้าตั้งค่าอยู่เลยนานเท่านี้ และมี Wi-Fi ที่บันทึกไว้แล้ว = กลับไปทำงานปกติ
+// กันกรณีเผลอกดปุ่มเขียวค้างแล้วกล่องเงียบไปทั้งวัน
+constexpr unsigned long SETUP_IDLE_TIMEOUT_MS = 5UL * 60UL * 1000UL;
+
+// ---------------------------------------------------------------------------
+// การเชื่อมต่อกับ server (ตั้งค่า SERVER_BASE_URL และ DEVICE_API_KEY ใน secrets.h)
+// ---------------------------------------------------------------------------
+
+constexpr char FIRMWARE_VERSION[] = "1.3.1";
+
+// รอบการดึงตารางยาเมื่อไม่มีคำสั่งค้าง (server อาจสั่งให้ถี่ขึ้นผ่าน next_poll_sec)
+// ถามตารางจาก server อย่างน้อยทุกเท่านี้ แก้บนเว็บแล้วจอจะเปลี่ยนภายในไม่กี่วินาที
+// ทำได้เพราะการคุยกับ server อยู่ใน task เบื้องหลัง ไม่ทำให้ปุ่ม จอ หรือเสียงค้างอีกแล้ว
+constexpr unsigned long SYNC_INTERVAL_MS = 5UL * 1000UL;
+
+// ถือสาย /api/device/wait ไว้นานสุดกี่วินาที server ตอบทันทีเมื่อมีอะไรเปลี่ยน
+// ระหว่างถือสาย งานเครือข่ายอื่น (ส่งผลการจ่ายยา) ต้องรอ ค่านี้จึงเป็นเวลารอสูงสุดของงานนั้นด้วย
+// ต้องไม่เกิน 25 (เพดานของ server)
+constexpr unsigned long WAIT_TIMEOUT_SEC = 15;
+static_assert(WAIT_TIMEOUT_SEC >= 1 && WAIT_TIMEOUT_SEC <= 25, "server holds /wait for at most 25 s");
+// server แจ้งการเปลี่ยนเองได้แล้ว sync เต็มเป็นแค่ตาข่ายรองรับ ห่างได้ถึงเท่านี้
+constexpr unsigned long FULL_SYNC_MAX_MS = 10UL * 60UL * 1000UL;
+// server ตอบ 404 ที่ /wait (ยังไม่อัปเดต) กลับไปถามเป็นรอบ แล้วลองใหม่หลังจากนี้
+constexpr unsigned long WAIT_UNSUPPORTED_RETRY_MS = 10UL * 60UL * 1000UL;
+// เว้นระยะก่อน sync ใหม่หลังเรียกไม่สำเร็จ กันยิงรัวตอน server ล่ม
+constexpr unsigned long SYNC_RETRY_MS = 15UL * 1000UL;
+// รอบการพยายามส่งผลการจ่ายยาที่ค้างอยู่ในคิว
+constexpr unsigned long EVENT_FLUSH_INTERVAL_MS = 10UL * 1000UL;
+constexpr unsigned long HTTP_TIMEOUT_MS = 8000UL;
+
+// ตรวจใบรับรองของเซิร์ฟเวอร์เมื่อ SERVER_BASE_URL เป็น https (ใช้ค่าใน certs.h)
+// ตั้งเป็น false เฉพาะตอนไล่ปัญหาเท่านั้น เพราะการไม่ตรวจ = ใครดักกลางทางก็อ่าน API Key ได้
+// ค่านี้ไม่มีผลเมื่อใช้ http ธรรมดาในวง LAN
+constexpr bool TLS_VERIFY_CERTIFICATE = true;
+
+// ---------------------------------------------------------------------------
+// พฤติกรรมการเตือนและการจ่ายยา
+// ---------------------------------------------------------------------------
+
+// ปลุกก่อนถึงเวลามื้อยากี่นาที (0 = ปลุกตรงเวลา)
+constexpr int ALERT_LEAD_MINUTES = 0;
+// เตือนนานสุดกี่นาทีก่อนบันทึกว่า "ขาดยา" — ต้องไม่เกิน grace_minutes ของ server (30 นาที)
+constexpr int ALERT_TIMEOUT_MINUTES = 30;
+// ถ้าเครื่องเพิ่งบูตแล้วพบว่ามื้อยาเลยมาเกินเท่านี้ ให้ข้ามไปเลยโดยไม่ปลุกย้อนหลัง
+constexpr int STALE_DOSE_MINUTES = 30;
+
+// กดปุ่มเหลืองแล้วเลื่อนการเตือนออกไปกี่นาที
+constexpr int SNOOZE_MINUTES = 5;
+// เลื่อนได้สูงสุดกี่ครั้งต่อมื้อ
+//
+// SNOOZE_MINUTES * MAX_SNOOZE_PER_DOSE ต้องน้อยกว่า ALERT_TIMEOUT_MINUTES
+// ไม่อย่างนั้นผู้ใช้จะเลื่อนจนเลยเวลาผ่อนผันแล้วกลายเป็นขาดยาโดยไม่ทันรู้ตัว
+constexpr uint8_t MAX_SNOOZE_PER_DOSE = 3;
+
+// เพดานจำนวนเม็ดต่อการจ่ายหนึ่งครั้ง ตรงกับขีดจำกัดของ dispenseMedicine()
+// ไม่ใช่จำนวนรอบหมุนอีกต่อไป เพราะรอบหมุนถูกกำหนดโดยเซ็นเซอร์ว่าได้ครบหรือยัง
+constexpr uint8_t MAX_PILLS_PER_DOSE = 9;
+
+// ความยาวสูงสุดของข้อมูลที่เก็บในหน่วยความจำ
+constexpr uint8_t MAX_DOSES_PER_SLOT = 6;   // มื้อยาต่อช่องต่อวัน
+constexpr uint8_t MAX_PENDING_EVENTS = 12;  // ผลการจ่ายยาที่รอส่งเมื่อเน็ตหลุด (เก็บลง NVS)
+constexpr uint8_t MAX_PENDING_COMMANDS = 5; // คำสั่งจากเว็บที่รอทำ
+
+// ---------------------------------------------------------------------------
+// ปุ่มกดและเสียงเตือน
+// ---------------------------------------------------------------------------
+
+constexpr unsigned long BUTTON_DEBOUNCE_MS = 40;
+// ห่างจากการอ่านปุ่มครั้งก่อนนานกว่านี้ = loop ค้าง เชื่อค่าที่อ่านได้ทันทีแทนการ debounce
+// ต้องมากกว่า BUTTON_DEBOUNCE_MS ชัดเจน และมากกว่ารอบ loop ปกติ (ไม่กี่มิลลิวินาที)
+constexpr unsigned long BUTTON_STALE_GAP_MS = 250;
+static_assert(BUTTON_STALE_GAP_MS > BUTTON_DEBOUNCE_MS * 3, "stale gap must dwarf the debounce window");
+// กดปุ่ม Cancel ค้างเกินเท่านี้ = สั่งหยุดกลไกทันที (กดสั้น = ข้ามมื้อยา)
+constexpr unsigned long CANCEL_HOLD_MS = 1200;
+
+// รูปแบบเสียง: ดัง BEEP_ON_MS ดับ BEEP_OFF_MS ซ้ำทุก ALERT_BEEP_PERIOD_MS
+constexpr unsigned long BEEP_ON_MS = 150;
+constexpr unsigned long BEEP_OFF_MS = 150;
+constexpr unsigned long ALERT_BEEP_PERIOD_MS = 5000;
+// ขั้วสัญญาณของโมดูล buzzer
+//   true  = ดังเมื่อขา IN เป็น HIGH (โมดูลที่ใช้ทรานซิสเตอร์ NPN ส่วนใหญ่)
+//   false = ดังเมื่อขา IN เป็น LOW  (โมดูล 3 ขาที่ใช้ PNP หลายรุ่น)
+// ตั้งผิดขั้วจะกลับด้าน: ร้องค้างตลอดเวลาที่ควรเงียบ และเงียบตอนที่ควรร้อง
+constexpr bool BUZZER_ACTIVE_HIGH = true;
+
+// ปิ๊บสั้นๆ หนึ่งครั้งตอนเปิดเครื่อง เพื่อให้รู้ทันทีว่า buzzer ต่อถูกขาและยังดังอยู่
+// ไม่ต้องรอให้ถึงเวลากินยาแล้วค่อยพบว่าเงียบ ตั้ง 0 เพื่อปิด
+constexpr unsigned long BUZZER_BOOT_CHIRP_MS = 120;

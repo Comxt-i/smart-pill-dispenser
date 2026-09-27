@@ -1,0 +1,22 @@
+Edit this wiring infographic. Preserve title, layout, all exact GPIO mapping, all module address labels and unaffected sections. Correct ONLY electrical drawing mistakes in buttons, LED, and I2C panels. Crucial: prioritize valid schematic connectivity over decorative wires.
+
+BUTTONS: replace all existing signal-to-ground wire drawings with three independent clear miniature electrical circuits. Each row shows an actual normally-open switch schematic symbol BETWEEN the GPIO and GND: GPIO33 — open switch — GND, GPIO32 — open switch — GND, GPIO27 — open switch — GND. Use a visible open contact gap. The realistic button images may stay as icons. Do not put GND directly on the GPIO wire. Do not connect rows to one another. Remove long shared wires from button panel to ESP32; use orange GPIO net labels at each end.
+
+LED: entirely replace the current wiring beneath the three LED icons with three separate readable rows:
+"GPIO25 → R 220–330Ω → LED แดง (A) → (K) GND"
+"GPIO2 → R 220–330Ω → LED เหลือง (A) → (K) GND"
+"GPIO5 → R 220–330Ω → LED เขียว (A) → (K) GND"
+A and K are anode and cathode. Each resistor is in SERIES. No GPIO has a direct GND connection. Use labeled connection text and separate tiny diagrams or just clear netlist rows to avoid a misleading drawing. Keep note resistors only if module has none.
+
+I2C: remove ALL overhead bus lines and the two pull-up resistor sketches above the LCD devices; they currently suggest erroneous connections between the 3.3V and 5V sides. Replace that area with a clean concise table with heading "ต่อขนานฝั่ง 5V ทั้ง 3 โมดูล" and four rows:
+"SDA → HV1"
+"SCL → HV2"
+"VCC → +5V BUS"
+"GND → GND BUS"
+Give each of the three device images four small named terminals SDA SCL VCC GND only; don't draw interconnecting wires there. This table applies to LCD เวลา 16×2 0x25, LCD ตารางยา 20×4 0x27, and RTC DS1307 0x68. Keep all three icons and addresses exactly.
+Level shifter left image should stay with labels:
+GPIO21(SDA) -> LV1; GPIO22(SCL) -> LV2; 3V3 -> LV; GND -> GND.
+HV1 -> "SDA ฝั่ง 5V"; HV2 -> "SCL ฝั่ง 5V"; HV -> "+5V BUS"; GND -> "GND BUS".
+No long wire from the central ESP32 power pins across I2C panel. Use local net labels instead.
+Add clear short text "Pull-up: LV1/LV2 ไป 3.3V • HV1/HV2 ไป 5V". No 3.3V pullup on HV buses.
+Maintain polished original Thai visual style and text readability. All other panels unchanged.

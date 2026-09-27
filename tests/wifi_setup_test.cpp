@@ -9,9 +9,9 @@ void pinMode(uint8_t, uint8_t) {}
 SerialClass Serial;
 EspClass ESP;
 WiFiClass WiFi;
-int claimCode = 200, requestedSync = 0;
+int claimCode = 200, requestedSync = 0, claimCalls = 0;
 void appStatusJson(String &) {}
-int netSyncCompleteSetup(const char *) { return claimCode; }
+int netSyncCompleteSetup(const char *) { ++claimCalls; return claimCode; }
 void netSyncRequestNow() { ++requestedSync; }
 uint32_t fakeClock = 0;  // 0 = กล่องยังไม่มีเวลา
 bool rtcIsValid() { return fakeClock != 0; }
@@ -35,6 +35,10 @@ int main() {
   char normalized[21];
   assert(normalizeSetupToken("01234567-89ab-cdef-0123", normalized));
   assert(strcmp(normalized,"0123456789ABCDEF0123")==0);
+  assert(normalizeSetupToken("abcd-efgh", normalized) && strcmp(normalized,"ABCDEFGH")==0);
+  assert(normalizeSetupToken(" 2345 6789 ", normalized) && strcmp(normalized,"23456789")==0);
+  for (const char *bad : {"ABCD0FGH", "ABCD1FGH", "ABCDIFGH", "ABCDLFGH", "ABCDOFGH", "ABCDEFG", "ABCDEFGHJ", "ABCDEFG!"})
+    assert(!normalizeSetupToken(bad, normalized) && normalized[0]=='\0');
   assert(!normalizeSetupToken("short",normalized));
   assert(!normalizeSetupToken("0123456789ABCDEG01234",normalized));
   assert(validSetupWifi("OpenNetwork", ""));
@@ -95,10 +99,26 @@ int main() {
   assert(wifiSetupActive());
 
   submit("Home", "password", "0123456789ABCDEF0123"); wifiWebLoop();
+  claimCode=429; WiFi.connectionStatus=WL_CONNECTED; wifiWebLoop();
+  assert(!connecting && !completed && saved.magic==WIFI_MAGIC && wifiSetupActive());
+  assert(setupToken[0]=='\0');
+  assert(strcmp(wifiSetupStatusShort(), "RATE LIMITED")==0);
+  const int connectsAfterLimit=WiFi.beginCount, claimsAfterLimit=claimCalls;
+  const int syncBeforeLimitClose=requestedSync;
+  fakeTime+=10001; wifiWebLoop();
+  assert(WiFi.beginCount==connectsAfterLimit && claimCalls==claimsAfterLimit);
+  fakeTime+=SETUP_RESULT_GRACE_MS; wifiWebLoop();
+  assert(!wifiSetupActive() && requestedSync==syncBeforeLimitClose+1);
+  assert(claimCalls==claimsAfterLimit);
+  saved={};
+  assert(wifiStartSetup());
+
+  submit("Home", "password", "abcd-efgh"); wifiWebLoop();
   claimCode=200; storage.writeOk=false; WiFi.connectionStatus=WL_CONNECTED; wifiWebLoop();
   assert(!completed && saved.magic==0 && wifiSetupActive());
 
-  submit("Home", "password", "0123456789ABCDEF0123"); wifiWebLoop();
+  submit("Home", "password", "abcd-efgh"); wifiWebLoop();
+  assert(strcmp(setupToken,"ABCDEFGH")==0);
   storage.writeOk=true; WiFi.connectionStatus=WL_CONNECTED; wifiWebLoop();
   assert(completed && saved.magic==WIFI_MAGIC && wifiSetupActive());
   assert(strcmp(saved.ssid,"Home")==0 && setupToken[0]=='\0');

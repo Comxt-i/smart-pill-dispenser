@@ -82,7 +82,7 @@ bool systemClockReadyForTls()
     const time_t fromDevice = static_cast<time_t>(localEpoch) - tzOffsetMinutes * 60;
     const time_t system = time(nullptr);
     const time_t drift = system > fromDevice ? system - fromDevice : fromDevice - system;
-    if (system <= MIN_VALID_EPOCH || drift > TLS_CLOCK_RESYNC_S)
+    if (system <= MIN_VALID_EPOCH || drift > static_cast<time_t>(TLS_CLOCK_RESYNC_S))
     {
       timeval now = {};
       now.tv_sec = fromDevice;

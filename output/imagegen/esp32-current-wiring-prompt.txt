@@ -1,0 +1,45 @@
+Use case: infographic-diagram.
+Create a new high-resolution landscape Thai technical wiring infographic for the current Smart Pill Dispenser project. Use attached image ONLY as visual style reference: white background, navy Thai typography, colored rounded section panels, realistic small electronics illustrations, crisp colored logical wires. Rebuild the content entirely using the verified specification below. Aim 3840x2560 with spacious legible text. All Thai text correct. Do NOT reproduce outdated reference labels or short circuits. A logical wiring diagram, not a physical board pinout. Title "ผังการต่อ ESP32 — Smart Pill Dispenser"; subtitle "อ้างอิง firmware ปัจจุบัน • 27 กันยายน 2026"; note "ผังเชิงตรรกะ — ต่อโดยดูชื่อ GPIO บนบอร์ดจริง". Use net labels instead of long crossing wires when clearer. Identical net names electrically connected. Signal, power, and ground never joined.
+
+Layout: central illustrated ESP32 DevKit / ESP32-WROOM-32 functional block, surrounding distinct panels. Upper left buttons, lower left I2C; upper right servos, middle right vibration motor drivers; bottom panels LED, buzzer and sensor interface; full-width power footer. Can adjust to best readability. Each connection MUST have unambiguous source and destination names; use compact connection lists alongside module drawings if crowded.
+
+VERIFIED NETLIST:
+Buttons normally open each between GPIO and GND, INPUT_PULLUP, pressed LOW:
+Green "รับยา / Dispense — GPIO33"
+Yellow "เลื่อนเตือน / Snooze — GPIO32"
+Red "ข้ามมื้อ / Cancel — GPIO27"
+No 5V to buttons.
+
+Servos 1,2,3: SIG = GPIO18, GPIO19, GPIO23 respectively; every V+ = +5V BUS; every GND = GND BUS. Draw each servo with 3 separate labeled terminals, absolutely no SIG-to-V+ junction. "จ่ายไฟจากบัสโดยตรง • ตรวจว่า Servo รับไฟ 5V และสัญญาณ 3.3V"
+
+I2C: "I²C 100 kHz • ผ่าน Level Shifter สองทิศทาง".
+ESP32 GPIO21 -> LV1; GPIO22 -> LV2; 3V3 -> LV; GND -> GND.
+Level shifter HV1 -> SDA bus 5V; HV2 -> SCL bus 5V; HV -> +5V BUS.
+All three I2C devices share SDA/SCL in parallel and have VCC -> +5V BUS and GND -> GND BUS.
+LCD เวลา: 16×2, address 0x25, render physically 2 rows.
+LCD ตารางยา: 20×4, address 0x27, render physically 4 rows, wider/larger than clock LCD.
+RTC DS1307: 0x68, coin cell.
+"Pull-up SDA/SCL แยกฝั่ง 3.3V และ 5V". Do not connect 3V3 to LCD SDA.
+
+Vibration motors: "มอเตอร์สั่น 3 ตัว — DRV8833 × 2 บอร์ด".
+Board A channel A: AIN1 ← GPIO13 (PWM), AIN2 ← GPIO16 (DIR), AOUT1/AOUT2 -> motor 1 two terminals.
+Board A channel B: BIN1 ← GPIO26 (PWM), BIN2 ← GPIO17 (DIR), BOUT1/BOUT2 -> motor 2.
+Board B channel A: AIN1 ← GPIO4 (PWM), AIN2 ← GPIO14 (DIR), AOUT1/AOUT2 -> motor 3.
+Board B channel B unused: BIN1/BIN2 -> GND; BOUT1/BOUT2 unconnected.
+Both board GND -> GND BUS; both nSLEEP/SLP -> 3V3 (HIGH); both VM -> "+VM ตามพิกัดมอเตอร์". IMPORTANT motor voltage is unconfirmed, don't hardwire 5V to possibly 3V motors. Use separate +VM net label with note "มอเตอร์ 3V ใช้แหล่งจ่าย 3V ที่เหมาะสม • GND ร่วม". "GPIO14 อาจมีสัญญาณช่วงบูต". Drivers drawn as logical modules with precise labels instead of invented physical pin locations.
+
+Status LED common cathode: "ไฟสถานะ — Common cathode"; red <- GPIO25, yellow <- GPIO2, green <- GPIO5, common -> GND. Series resistor per LED labeled "220–330Ω หากโมดูลไม่มี". Can draw compact 3 light module and connection list.
+
+Buzzer module with driver: IN <- GPIO15, VCC -> +5V BUS, GND -> GND BUS. "Active buzzer + driver • IN 3.3V • Active HIGH".
+
+Sensor panel dashed gray: "อินพุตตรวจเม็ดยา — ต้องยืนยันชุด KY-008"
+Receiver 1 OUT -> GPIO34; Receiver 2 OUT -> GPIO35; Receiver 3 OUT -> GPIO36.
+"โค้ดอ่าน Active LOW • สัญญาณเข้าไม่เกิน 3.3V"
+"GPIO34/35/36 ไม่มี Pull-up ภายใน"
+"Open-collector: Pull-up 10kΩ ไป 3.3V"
+"ตรวจขาและแรงดันตัวรับก่อนต่อ • ไม่ใช่ขาขับเลเซอร์"
+Do not invent transmitter wiring or depict confirmed sensor power supply.
+
+Power footer: 5V regulated adapter positive -> fuse -> on/off switch -> +5V BUS. Adapter negative -> GND BUS. 1000µF capacitor in PARALLEL across these rails, + to +5V, - to GND, rating >=10V. "+5V BUS → Servo ×3 / LCD ×2 / DS1307 / HV / Buzzer / ESP32 5V-VIN*"; "*ใช้ 5V/VIN เฉพาะบอร์ดที่รองรับ • ตรวจวงจรก่อนใช้ USB ร่วม". "GND ร่วมทุกอุปกรณ์ รวมแหล่งจ่าย +VM". "เลือก Adapter และ Fuse ตามกระแสรวมและพิกัดสาย". No claim exact fuse current guaranteed.
+Small important notes: "ห้ามต่อ 5V เข้า GPIO หรือ 3V3"; "ค่าเริ่มต้น: Servo ปิด • สอบเทียบก่อนเปิดใช้งาน".
+Legend red +5V; black GND; orange GPIO; green SDA; blue SCL; purple 3.3V. No junction dots where unrelated nets merely cross. Readability over excessive decoration. Keep all pin mapping exact.

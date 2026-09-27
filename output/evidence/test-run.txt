@@ -1,0 +1,30 @@
+{
+  "start": "2026-09-26T16:50:35.007982+07:00",
+  "end": "2026-09-26T16:51:04.630632+07:00",
+  "elapsed_seconds": 29.622,
+  "exit_code": 0,
+  "platform": "macOS-14.5-arm64-arm-64bit",
+  "python": "3.12.14"
+}
+
+test_real_command_queue_deduplicates_and_reserves_before_delivery (test_command_delivery.CommandDeliveryTest.test_real_command_queue_deduplicates_and_reserves_before_delivery) ... ok
+test_retry_reboot_storage_failure_and_capacity (test_command_journal.CommandJournalTest.test_retry_reboot_storage_failure_and_capacity) ... ok
+test_controller (test_dispenser_control.DispenserControlTest.test_controller) ... ok
+test_every_module_parses (test_firmware_syntax.FirmwareSyntaxTest.test_every_module_parses) ... ok
+test_calibration_gate_and_pulse_limits (test_hardware_profile.HardwareProfileTest.test_calibration_gate_and_pulse_limits) ... ok
+test_marquee (test_marquee.MarqueeTest.test_marquee) ... ok
+test_network_work_never_blocks_and_applies_on_the_main_loop (test_net_async.NetAsyncTest.test_network_work_never_blocks_and_applies_on_the_main_loop) ... ok
+test_size_from_web_maps_to_hole (test_pill_hole.PillHoleTest.test_size_from_web_maps_to_hole) ... ok
+test_real_application_schedule_buttons_and_multi_channel_controller (test_round_integration.RoundIntegrationTest.test_real_application_schedule_buttons_and_multi_channel_controller) ... ok
+test_actual_button_and_application_handlers (test_runtime_setup.RuntimeSetupTest.test_actual_button_and_application_handlers) ... ok
+test_short_long_and_busy_gestures (test_runtime_setup.RuntimeSetupTest.test_short_long_and_busy_gestures) ... ok
+test_schedule_and_closed_doses_survive_a_reboot (test_schedule_cache.ScheduleCacheTest.test_schedule_and_closed_doses_survive_a_reboot) ... ok
+test_schedule_engine (test_schedule_store.ScheduleStoreTest.test_schedule_engine) ... ok
+test_real_rtc_module_without_hardware (test_software_clock.SoftwareClockTest.test_real_rtc_module_without_hardware) ... ok
+test_portal_state_machine (test_wifi_setup.WifiSetupTest.test_portal_state_machine) ... ok
+test_preset_network (test_wifi_setup.WifiSetupTest.test_preset_network) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 29.489s
+
+OK
