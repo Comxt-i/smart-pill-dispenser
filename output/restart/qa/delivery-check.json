@@ -1,0 +1,11 @@
+{
+  "pages": 31,
+  "all_pages_visually_reviewed": true,
+  "figures": 14,
+  "tables": 11,
+  "embedded_images_with_logo": 15,
+  "original_sha256": "909e113dd3082e4bc2cf154e719e8dd674d2e3742c1f516697d760767b44dd4e",
+  "output_sha256": "bf3ace12cf27d5303df4e6a6626295e2bfaff122bbaab99f7f7f45abcb21bc0b",
+  "software_tests": 16,
+  "unittest_seconds": 30.406
+}

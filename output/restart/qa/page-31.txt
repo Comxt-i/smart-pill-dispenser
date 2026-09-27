@@ -1,0 +1,34 @@
+26
+เอกัส
+รอ 
+งอ(ง
+[1] Espressif Systems, “ESP32-WROOM-32 Datasheet” และ “GPIO & RTC GPIO,” เอกสารออนไลน์ 
+ไม่ระบุปีที่ใช้อ้างอิง เข้าถึง 26 กันยายน 2569. https://documentation.espressif.com/esp32-
+wroom-32_datasheet_en.html และ 
+https://docs.espressif.com/projects/esp-faq/en/latest/software-framework/peripherals/
+gpio.html
+[2] Analog Devices, “DS1307 Datasheet and Product Info,” เอกสารออนไลน์ ไม่ระบุปีที่ใช้อ้างอิง 
+เข้าถึง 26 กันยายน 2569. https://www.analog.com/en/products/ds1307.html
+[3] Texas Instruments, “DRV8833 Dual H-Bridge Motor Driver,” เอกสารผลิตภัณฑ์และข้อมูลจำเพาะ 
+ไม่ระบุปีที่ใช้อ้างอิง เข้าถึง 26 กันยายน 2569. https://www.ti.com/product/DRV8833
+[4] Espressif Systems, “Preferences — Arduino ESP32 Documentation,” ไม่ระบุปีที่ใช้อ้างอิง เข้าถึง 
+26 กันยายน 2569. 
+https://docs.espressif.com/projects/arduino-esp32/en/latest/api/preferences.html
+[5] โครงงาน smart-pill-dispenser, โค้ดและเอกสารภายในที่ตรวจ 26 กันยายน 2569: 
+ESP32_Main/config.h, hardware_profile.h, dispenser_control.cpp, pill_app.cpp, net_sync.cpp, 
+schedule_cache.cpp, command_journal.cpp, event_queue.cpp, wifi_web.cpp และ 
+setup_portal.h; docs/QR_WIFI_SETUP.md และ ESP32_WIRING.md. เฟิร์มแวร์ระบุรุ่น 1.3.1; working 
+tree มีการแก้ไขจาก commit ba301989a8d00a7315d68556551cb4dfd286374c.
+[6] โครงงาน embedded_project, โค้ดเว็บไซต์และบริการภายในที่ตรวจ 26 กันยายน 2569: 
+frontend/src/pages/DeviceSetupLabel.tsx, DeviceSetup.tsx, Devices.tsx และ ScheduleTable.tsx; 
+backend/src/modules/device-setup/device-setup.service.ts, setup-code.ts และ 
+backend/prisma/schema.prisma. ภาพเว็บไซต์ปัจจุบันใช้ frontend/dist กับคำตอบ API จำลองใน
+เครื่อง; ภาพถ่ายจากต้นฉบับอ้างอิง [7].
+[7] คณะผู้จัดทำ, “รายงานโครงงานเครื่องจ่ายยาอัจฉริยะ,” ไฟล์ Smart_Pill_Dispenser_Report.docx 
+ฉบับต้นทางที่ได้รับ 26 กันยายน 2569. ใช้อ้างอิงข้อมูลผู้จัดทำ ภาพหน้าจอตั้งค่า ตราสถาบัน และ
+รายการต้นทุน; ไม่มีข้อมูลที่มาภาพชุดเลเซอร์เพียงพอจึงไม่นำภาพนั้นมาใช้.
+[8] บันทึกผลการรันทดสอบของโครงงาน, output/restart/evidence/test-run.txt, 26 กันยายน 2569 
+เวลา 23:54:38–23:55:09 น. UTC+7. คำสั่ง Python -B -m unittest discover -s tests -p test_*.py 
+-v; ผ่าน 16 เมธอด ใช้เวลา unittest 30.406 วินาที.
+[9] Google Cloud, “Google Cloud Pricing Calculator,” ไม่ระบุปีที่ใช้อ้างอิง เข้าถึง 26 กันยายน 2569. 
+https://cloud.google.com/products/calculator

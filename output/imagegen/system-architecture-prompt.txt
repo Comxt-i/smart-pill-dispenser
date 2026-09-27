@@ -1,0 +1,29 @@
+Create a clean precise system architecture diagram as a high-resolution landscape PNG, white background, dark navy text, thin charcoal arrows, subtle pale-blue rounded rectangular boxes. Professional engineering report style, no decorative electronics photos. Thai text crisp and correctly spelled. Title "ผังการทำงาน Smart Pill Dispenser". Subtitle "ลูกศรแสดงทิศทางข้อมูลและคำสั่ง". This is a system diagram, not electrical wiring. Use ample spacing and orthogonal connectors without overlaps. Exact structure and arrow directions are mandatory.
+
+Top row left to right:
+1 "ผู้ใช้ / ผู้ดูแล" second line "เบราว์เซอร์บนโทรศัพท์"
+2 "React Website" second line "บัญชีผู้ใช้ / ตารางยา"
+3 "NestJS API" second line "ยืนยันตัวตน / ตารางยา / ประวัติ"
+4 database cylinder "PostgreSQL" second line "จัดเก็บข้อมูลถาวร"
+Between each adjacent pair show TWO separate opposite arrows (or clearly two-headed connectors with paired descriptions):
+User -> React label "กรอกข้อมูล / คำสั่ง"; React -> User label "แสดงผล".
+React -> API label "คำขอ API"; API -> React label "ข้อมูล / ผลตอบกลับ".
+API -> database label "อ่าน / บันทึก"; database -> API label "ข้อมูล / ผลการบันทึก".
+
+Middle large central box below API: "ESP32 Firmware" and "เวลา / ตารางยา / ควบคุมการจ่าย" and "บันทึกคำสั่งและผลที่รอส่ง".
+Two separated opposite vertical arrows between ESP32 and NestJS, with generously spaced labels to either side:
+UPWARD ESP32 -> API label "ขอข้อมูล / รอการเปลี่ยนแปลง / ส่งผลการจ่าย".
+DOWNWARD API -> ESP32 label "ตอบกลับ: เวลา / ตารางยา / คำสั่ง / ผลรับข้อมูล".
+Small note next to these arrows: "ESP32 เป็นฝ่ายเริ่มการเชื่อมต่อ HTTP".
+
+Hardware lower area, arranged with sufficient space for input arrows upward and output arrows downward:
+LEFT: box "I²C Level Shifter" subtitle "3.3V ↔ 5V". ESP32 <-> this box with double-headed arrow label "I²C". Below level shifter two boxes: "RTC DS1307" / "นาฬิกา • 0x68" and "LCD 2 จอ" / "เวลา 16×2 • 0x25" / "ตารางยา 20×4 • 0x27". Level shifter <-> RTC label "อ่าน / ตั้งเวลา"; level shifter -> LCD label "แสดงผล".
+CENTER: box "Servo 3 ตัว" with arrow ESP32 -> Servo label "PWM".
+Next box "DRV8833 × 2 บอร์ด" with arrow ESP32 -> driver label "PWM / DIR". Driver -> box "มอเตอร์สั่น 3 ตัว" label "ขับมอเตอร์".
+RIGHT input and output boxes clearly separate:
+"ปุ่มกด" / "Dispense / Snooze / Cancel" with arrow FROM buttons TO ESP32 label "สถานะปุ่ม".
+"ไฟสถานะ / Buzzer" with arrow FROM ESP32 TO this box label "ควบคุมไฟ / เสียง".
+Gray dashed-border box "ตัวรับแสงตรวจเม็ดยา 3 ช่อง" / "ชุด KY-008 ยังต้องยืนยันกับอุปกรณ์จริง", with dashed arrow FROM sensor TO ESP32 label "สัญญาณตรวจเม็ดยา". Gray dashed arrow indicates interface requiring hardware verification.
+
+Footer: "ผังการทำงานของระบบ — ไม่ใช่ผังต่อสายไฟ". Small legend "เส้นประ: ส่วนที่ยังต้องยืนยันกับอุปกรณ์จริง".
+Do not merge buttons and outputs into a shared box. Do not draw a sensor arrow away from ESP32. Do not omit any box. All text legible, no arrows passing through text or boxes. Balanced spacious layout; increase canvas height if needed.
