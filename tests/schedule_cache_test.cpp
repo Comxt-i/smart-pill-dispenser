@@ -2,6 +2,7 @@
 // เรียก scheduleCacheBegin() ซ้ำ = จำลองเปิดเครื่องใหม่ (อ่านกลับจาก NVS ปลอม)
 #include <cassert>
 #include <cstring>
+#include "../ESP32_Main/flash_store.cpp"
 #include "../ESP32_Main/schedule_cache.cpp"
 
 SerialClass Serial;
@@ -64,5 +65,27 @@ int main()
   scheduleCacheMarkClosed(nullptr, 20260927);
   scheduleCacheMarkClosed("dose-9", 0);
   assert(closed.count == 1);
+
+  // ---- มีพาร์ทิชันไฟล์: ตารางอยู่ในไฟล์ ไม่กินที่ NVS ----
+  bodyStore.bytes.assign(40, 0xAB);  // ของเก่าที่ firmware รุ่นก่อนเก็บไว้ใน NVS
+  flashStoreBegin();
+  scheduleCacheBegin();
+  assert(bodyStore.bytes.empty());  // คืนที่ให้ NVS แล้ว
+  assert(scheduleCacheStore(weekly, "cccc3333", 20260928));
+  assert(bodyStore.bytes.empty());  // เขียนลงไฟล์ ไม่ใช่ NVS
+  assert(fakeFlash().files.count("/schedule.bin") == 1);
+  scheduleCacheBegin();  // รีบูต
+  assert(strcmp(scheduleCacheStateVersion(), "cccc3333") == 0);
+  assert(scheduleCacheLoad(body, day) && strcmp(body.c_str(), weekly.c_str()) == 0 && day == 20260928);
+  // ไฟดับกลางการเขียนรุ่นใหม่: ยังได้รุ่นเดิมครบ
+  fakeFlash().renameOk = false;
+  assert(!scheduleCacheStore(String("{\"slots\":[]}"), "dddd4444", 20260928));
+  fakeFlash().renameOk = true;
+  scheduleCacheBegin();
+  assert(strcmp(scheduleCacheStateVersion(), "cccc3333") == 0);
+  // ไฟล์เสีย: ถือว่าไม่มี
+  fakeFlash().files["/schedule.bin"][0] ^= 0xFF;
+  scheduleCacheBegin();
+  assert(!scheduleCacheLoad(body, day));
   return 0;
 }

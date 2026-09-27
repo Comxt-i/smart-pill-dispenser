@@ -6,6 +6,7 @@
 #include <cstring>
 #include "../ESP32_Main/net_sync.cpp"
 #include "../ESP32_Main/command_journal.cpp"
+#include "../ESP32_Main/flash_store.cpp"
 #include "../ESP32_Main/schedule_cache.cpp"
 
 FakeHttp fakeHttp;
@@ -56,6 +57,7 @@ int main()
   assert(SYNC_INTERVAL_MS <= 10000UL);  // แก้บนเว็บแล้วจอต้องเปลี่ยนในไม่กี่วินาที
 
   // ---- ขอตาราง: ส่งงานแล้วกลับทันที ผลยังไม่ถูกใช้จนกว่า loop จะมารับ ----
+  assert(!netSyncFirstSyncFinished());  // เพิ่งเปิดเครื่อง ยังไม่ได้คำตอบจาก server
   assert(netSyncDue());
   assert(netSyncFetch());
   assert(fakeHttp.requests == 1 && lastUrlHas("/api/device/sync"));
@@ -75,6 +77,7 @@ int main()
   assert(fakeHttp.requests == 1);
 
   netSyncService();  // loop หลักมารับผล
+  assert(netSyncFirstSyncFinished());   // ได้คำตอบแล้ว ใช้ตัดสินว่าจะหันไปใช้ตารางในเครื่องไหม
   assert(syncCommits == 1 && netSyncLastCallOk());
   netSyncService();  // เรียกซ้ำต้องไม่นำผลเดิมไปใช้อีก
   assert(syncCommits == 1);
@@ -177,7 +180,7 @@ int main()
   int requestsBefore = fakeHttp.requests;
   netSyncPump();
   assert(fakeHttp.requests == requestsBefore + 1);
-  assert(lastUrlHas("/api/device/wait?state=abc12345&timeout_sec=15"));
+  assert(lastUrlHas("/api/device/wait?state=abc12345&timeout_sec=25"));
   // HTTP timeout ต้องยาวกว่าที่ server ถือสายไว้ ไม่งั้นกล่องตัดสายเองก่อน server ตอบ
   assert(job.timeoutMs > WAIT_TIMEOUT_SEC * 1000UL);
   netSyncPump();  // มีงานค้าง: ห้ามเปิดสายซ้อน

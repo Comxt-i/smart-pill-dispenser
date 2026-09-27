@@ -18,6 +18,7 @@ class WebServer {
   void handleClient() {}
   int lastCode = 0;
   std::map<std::string, String> args;
-  void send(int code, const char *, const String &) { lastCode = code; }
+  String lastBody;
+  void send(int code, const char *, const String &body) { lastCode = code; lastBody = body; }
   String arg(const char *key) { return args[key]; }
 };

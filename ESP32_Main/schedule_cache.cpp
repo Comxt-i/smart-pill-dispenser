@@ -1,5 +1,6 @@
 #include "schedule_cache.h"
 #include "config.h"
+#include "flash_store.h"
 
 #include <Preferences.h>
 #include <stdlib.h>
@@ -24,6 +25,8 @@ struct BodyHeader {
 
 Preferences bodyStore;
 bool bodyReady = false;
+// มีพาร์ทิชันไฟล์ = เก็บในไฟล์ ไม่กินที่ NVS ที่บันทึกคำสั่งกับ Wi-Fi ต้องใช้
+constexpr char BODY_FILE[] = "/schedule.bin";
 char storedVersion[12] = "";
 uint32_t storedDay = 0;
 
@@ -51,13 +54,17 @@ void copyCacheText(char *dest, size_t size, const char *source)
 /** อ่าน blob ทั้งก้อนมาไว้ใน buffer ที่จองใหม่ ผู้เรียกต้อง free() เอง */
 uint8_t *readBody(size_t &size)
 {
-  size = bodyReady ? bodyStore.getBytesLength("payload") : 0;
+  size = flashStoreReady() ? flashStoreSize(BODY_FILE)
+       : bodyReady         ? bodyStore.getBytesLength("payload")
+                           : 0;
   if (size < sizeof(BodyHeader) + 1 || size > sizeof(BodyHeader) + MAX_BODY_BYTES + 1)
     return nullptr;
   uint8_t *buffer = static_cast<uint8_t *>(malloc(size));
   if (!buffer)
     return nullptr;
-  if (bodyStore.getBytes("payload", buffer, size) != size)
+  const bool read = flashStoreReady() ? flashStoreRead(BODY_FILE, buffer, size)
+                                     : bodyStore.getBytes("payload", buffer, size) == size;
+  if (!read)
   {
     free(buffer);
     return nullptr;
@@ -79,6 +86,9 @@ uint8_t *readBody(size_t &size)
 void scheduleCacheBegin()
 {
   bodyReady = bodyStore.begin("pillsched", false);
+  // firmware รุ่นก่อนเก็บตารางไว้ใน NVS ย้ายมาไฟล์แล้วต้องคืนที่ให้ NVS (ข้อมูลเก่าถูก sync ใหม่แทนได้)
+  if (flashStoreReady() && bodyReady && bodyStore.getBytesLength("payload") > 0)
+    bodyStore.remove("payload");
   closedReady = closedStore.begin("pillclosed", false);
 
   storedVersion[0] = '\0';
@@ -107,7 +117,7 @@ void scheduleCacheBegin()
 
 bool scheduleCacheStore(const String &body, const char *stateVersion, uint32_t dayKey)
 {
-  if (!bodyReady || !stateVersion || stateVersion[0] == '\0')
+  if ((!bodyReady && !flashStoreReady()) || !stateVersion || stateVersion[0] == '\0')
     return false;
   if (strcmp(stateVersion, storedVersion) == 0 && dayKey == storedDay)
     return false;  // ไม่มีอะไรใหม่ ไม่เขียน NVS ให้สึกหรอเปล่าๆ
@@ -131,7 +141,8 @@ bool scheduleCacheStore(const String &body, const char *stateVersion, uint32_t d
   memcpy(buffer, &header, sizeof(header));
   memcpy(buffer + sizeof(header), body.c_str(), length + 1);
 
-  const bool ok = bodyStore.putBytes("payload", buffer, size) == size;
+  const bool ok = flashStoreReady() ? flashStoreWrite(BODY_FILE, buffer, size)
+                                   : bodyStore.putBytes("payload", buffer, size) == size;
   free(buffer);
   if (!ok)
   {

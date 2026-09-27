@@ -27,6 +27,11 @@ constexpr int INPUT = 0;
 constexpr int INPUT_PULLUP = 2;
 
 unsigned long millis();
+unsigned long micros();
+#define IRAM_ATTR
+constexpr int CHANGE = 3;
+inline uint8_t digitalPinToInterrupt(uint8_t pin) { return pin; }
+void attachInterruptArg(uint8_t pin, void (*handler)(void *), void *arg, int mode);
 void delay(unsigned long ms);
 void delayMicroseconds(unsigned int us);
 void pinMode(uint8_t pin, uint8_t mode);

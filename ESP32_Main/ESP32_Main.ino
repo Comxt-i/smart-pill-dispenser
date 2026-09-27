@@ -16,6 +16,11 @@ void setup()
   // ถ้าปล่อยไว้จนถึง appBegin() มอเตอร์จะสั่นค้างเป็นวินาทีทุกครั้งที่เปิดเครื่อง
   dispenserSafePinsEarly();
 
+  // GPIO15 มี pull-up ในตัวตอนบูต buzzer แบบ active-high จะดังตั้งแต่เสียบไฟ
+  // จนกว่าโค้ดจะเข้าไปคุมขา (ผ่าน Serial สแกน I2C และฟอร์แมตแฟลชครั้งแรกซึ่งนานหลายวินาที)
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, BUZZER_ACTIVE_HIGH ? LOW : HIGH);
+
   Serial.begin(115200);
   delay(200);
   Serial.println();

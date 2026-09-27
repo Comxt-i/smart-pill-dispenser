@@ -2,7 +2,9 @@
 #include "config.h"
 #include "pill_app.h"
 #include "net_sync.h"
+#include "rtc_lcd.h"
 #include "secrets.h"
+#include "software_clock.h"
 #include "setup_portal.h"
 #include "wifi_setup_validation.h"
 
@@ -183,7 +185,58 @@ void handleSetupStatus()
 {
   if (!requirePortal()) return;
   JsonDocument doc; doc["message"] = message; doc["busy"] = connecting || startPending; doc["done"] = completed;
+  // เวลาในกล่อง (เวลาท้องถิ่นนับเป็นวินาที 0 = ยังไม่มีเวลา)
+  doc["clock"] = rtcIsValid() ? rtcLocalEpoch() : 0;
   sendJson(doc);
+}
+
+/**
+ * ตั้งเวลาตามมือถือ: ใช้ได้โดยไม่ต้องมีอินเทอร์เน็ตหรือต่อคอม
+ *
+ * ปลอดภัยพอเพราะเปิดหน้านี้ได้ทางเดียวคือกดปุ่มเขียวค้างที่ตัวเครื่อง แล้วต่อ Wi-Fi ของกล่องเอง
+ * (หน้านี้ไม่เปิดให้เครือข่ายบ้าน) มือถือส่งเวลาท้องถิ่นของตัวเองมา ซึ่งมือถือตั้งจากเครือข่ายมือถืออยู่แล้ว
+ *
+ * auto=1: หน้าเว็บส่งมาเองตอนเปิด เพราะเวลาในกล่องไม่มีหรือไม่ตรงกับมือถือ
+ *         ไม่ปิดโหมดตั้งค่า เพราะผู้ใช้อาจเปิดหน้านี้มาเพื่อตั้ง Wi-Fi และกำลังกรอกอยู่
+ */
+void handleSetTime()
+{
+  if (!requirePortal()) return;
+  if (strcmp(server.arg("nonce").c_str(), nonce) != 0) { reply(403, "หน้า Setup หมดอายุ กรุณาเปิดหน้าใหม่"); return; }
+  const String raw = server.arg("local_epoch");
+  char *end = nullptr;
+  const unsigned long value = strtoul(raw.c_str(), &end, 10);
+  if (raw.length() == 0 || !end || *end != '\0' || !SoftwareClock::validEpoch(value)) {
+    reply(400, "เวลาจากมือถือไม่ถูกต้อง ตรวจวันที่และเวลาของมือถือ"); return;
+  }
+  rtcSyncFromEpoch(static_cast<uint32_t>(value));
+  if (!rtcIsValid()) { reply(500, "ตั้งเวลาไม่สำเร็จ"); return; }
+  Serial.printf("[Setup] ตั้งเวลาตามมือถือแล้ว (local epoch %lu)\n", value);
+  netSyncRequestNow();  // มีเวลาแล้ว HTTPS ต่อได้ ถาม server ทันทีเมื่อกลับไปทำงานปกติ
+  shortStatus = "TIME SET";
+  if (server.arg("auto") == "1") { reply(200, "ตั้งเวลาในกล่องตามมือถือแล้ว"); return; }
+  // ตั้งเวลาเสร็จแล้วกลับไปแสดงตารางยาเอง ไม่อย่างนั้นหน้าเว็บที่เปิดค้างบนมือถือ (โพลทุก 2 วินาที)
+  // จะทำให้กล่องค้างหน้า Setup และไม่เตือนยาไปเรื่อยๆ
+  // ยังไม่มี Wi-Fi บันทึกไว้ = ผู้ใช้ยังต้องตั้ง Wi-Fi ต่อ จึงไม่ปิด ถ้าเริ่มกรอก Wi-Fi ระหว่างรอ handleConnect จะยกเลิกการปิด
+  if (saved.magic == WIFI_MAGIC && !connecting && !startPending) {
+    closePending = true;
+    closeAt = millis() + SETUP_RESULT_GRACE_MS;
+    reply(200, "ตั้งเวลาแล้ว กำลังกลับไปแสดงตารางยา (ถ้าจะตั้ง Wi-Fi ใหม่ กรอกด้านล่างได้เลย)");
+    return;
+  }
+  reply(200, "ตั้งเวลาในกล่องตามมือถือแล้ว ตั้ง Wi-Fi ด้านล่างต่อ หรือกด \"เสร็จแล้ว\"");
+}
+
+/** ผู้ใช้กด "เสร็จแล้ว": ปิดโหมดตั้งค่ากลับไปเตือนยาตามปกติ ไม่ต้องรอหมดเวลาเอง */
+void handleClose()
+{
+  if (!requirePortal()) return;
+  if (strcmp(server.arg("nonce").c_str(), nonce) != 0) { reply(403, "หน้า Setup หมดอายุ กรุณาเปิดหน้าใหม่"); return; }
+  if (connecting || startPending) { reply(409, "กำลังเชื่อม Wi-Fi อยู่ รอให้เสร็จก่อน"); return; }
+  reply(200, "ปิดโหมดตั้งค่าแล้ว กล่องกลับไปทำงานปกติ");
+  // เว้นให้คำตอบส่งถึงมือถือก่อนตัด Wi-Fi ของกล่อง
+  closePending = true;
+  closeAt = millis() + 1500;
 }
 }
 
@@ -235,6 +288,8 @@ void wifiWebBegin()
   server.on("/setup/connect", HTTP_POST, handleConnect);
   server.on("/setup/scan", HTTP_GET, handleScan);
   server.on("/setup/status", HTTP_GET, handleSetupStatus);
+  server.on("/setup/time", HTTP_POST, handleSetTime);
+  server.on("/setup/close", HTTP_POST, handleClose);
   server.on("/status", HTTP_GET, []() {
     if (setupActive) { handleSetupStatus(); return; }
     String body; appStatusJson(body); server.sendHeader("Cache-Control", "no-store"); server.send(200, "application/json", body);

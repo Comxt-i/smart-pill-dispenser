@@ -2,6 +2,7 @@
 #include "config.h"
 
 #include <ESP32Servo.h>
+#include <Wire.h>
 
 namespace {
 
@@ -49,9 +50,14 @@ struct Run {
   bool kicking = false;
   unsigned long kickStartedMs = 0;
 
-  // สถานะเซ็นเซอร์รอบก่อน ใช้จับ "ขอบ" ไม่ใช่ระดับ เม็ดเดียวจะได้ไม่ถูกนับซ้ำ
-  bool sensorWasBlocked = false;
-  unsigned long lastDetectMs = 0;
+  // ตัวแยกเม็ดยาจากขอบสัญญาณที่ interrupt จดไว้ (ดู pollSensor)
+  bool beamBlocked = false;     // ลำแสงถูกบังอยู่ไหม ตามขอบล่าสุดที่ประมวลผลแล้ว
+  bool inPass = false;          // อยู่ระหว่างการผ่านของเม็ดหนึ่งเม็ด (รวมช่วงกระเด้ง/หมุนตัว)
+  bool passCounted = false;     // การผ่านนี้นับไปแล้ว
+  uint32_t blockStartUs = 0;    // ลำแสงเริ่มถูกบังรอบล่าสุดเมื่อไร
+  uint32_t lastClearUs = 0;     // ลำแสงโล่งครั้งล่าสุดเมื่อไร
+  uint32_t blockedUsInPass = 0; // เวลาที่ถูกบังรวมทั้งการผ่านนี้ (ไม่นับช่วงที่กำลังบังอยู่)
+  bool jammed = false;          // ลำแสงถูกบังค้าง = มีของติดขวาง
 };
 
 // ทุกช่องไม่มีเม็ดตกเลย + รอบที่ได้เม็ด: เพดานรวมที่ตรรกะข้างล่างไม่มีทางเกิน
@@ -62,6 +68,44 @@ uint8_t currentHole(const Run &run) { return run.holeOrder[run.holePos]; }
 
 Servo dispenserServos[DISPENSER_COUNT];
 Run runs[DISPENSER_COUNT];
+
+// ---------------------------------------------------------------------------
+// ขอบสัญญาณเซ็นเซอร์จาก interrupt
+// ---------------------------------------------------------------------------
+//
+// ลำแสงเลเซอร์เล็กมาก เม็ดยาตัดผ่านแค่ไม่กี่มิลลิวินาที ถ้าอ่านระดับใน loop
+// รอบไหนช้า (เขียนจอ I2C, ขยับ servo) เม็ดนั้นหายไปเลย แล้วเครื่องหมุนจ่ายเพิ่มเกินจำนวน
+// interrupt จดทุกขอบพร้อมเวลาไว้ในคิว ส่วนการตัดสินว่าเป็นเม็ดหรือไม่ทำใน loop (ดู pollSensor)
+//
+// คิวหนึ่งต่อจาน: ผู้เขียนมีคนเดียวคือ interrupt ผู้อ่านมีคนเดียวคือ loop หลัก จึงไม่ต้องใช้ lock
+struct SensorEdge {
+  uint32_t atUs;
+  bool blocked;
+};
+constexpr uint8_t EDGE_QUEUE_SIZE = 32;
+struct EdgeQueue {
+  SensorEdge items[EDGE_QUEUE_SIZE];
+  volatile uint8_t head = 0;  // interrupt เขียน
+  volatile uint8_t tail = 0;  // loop อ่าน
+  volatile bool overflow = false;
+};
+EdgeQueue edgeQueues[DISPENSER_COUNT];
+
+void IRAM_ATTR onSensorEdge(void *arg)
+{
+  const uint8_t index = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(arg));
+  EdgeQueue &queue = edgeQueues[index];
+  const uint8_t next = static_cast<uint8_t>((queue.head + 1) % EDGE_QUEUE_SIZE);
+  if (next == queue.tail)
+  {
+    queue.overflow = true;  // สัญญาณรบกวนถี่จนคิวเต็ม loop จะตั้งสถานะใหม่จากระดับจริง
+    return;
+  }
+  const int level = digitalRead(PILL_SENSOR_PINS[index]);
+  queue.items[queue.head] = {static_cast<uint32_t>(micros()),
+                             PILL_SENSOR_ACTIVE_LOW ? level == LOW : level == HIGH};
+  queue.head = next;
+}
 
 /**
  * คิวผลลัพธ์แบบวงแหวน
@@ -149,40 +193,179 @@ bool readSensor(uint8_t index)
   return PILL_SENSOR_ACTIVE_LOW ? (level == LOW) : (level == HIGH);
 }
 
-/**
- * นับเม็ดที่เพิ่งตกผ่านลำแสงของจานนี้
- *
- * จับเฉพาะขอบขาลง (ว่าง -> ถูกบัง) และล็อกไว้ PILL_DETECT_LOCKOUT_MS
- * เพื่อไม่ให้เม็ดเดียวที่กระเด้งหรือหมุนตัวถูกนับหลายครั้ง
- *
- * ทุกตัวนับแยกรายจาน จานที่ทำงานพร้อมกันจึงไม่กวนกัน
- */
-void pollSensor(uint8_t index, unsigned long now)
+// ---------------------------------------------------------------------------
+// สวิตช์เลเซอร์: ติดเฉพาะตอนมีจานกำลังจ่าย
+// ---------------------------------------------------------------------------
+//
+// เลเซอร์ดับ = ตัวรับไม่เห็นแสง = อ่านได้ว่า "ถูกบัง" ตลอด จึงมีกติกาสองข้อ:
+//   1. ห้ามอ่านเซ็นเซอร์ก่อนเลเซอร์ติดและนิ่ง ไม่อย่างนั้นทุกการจ่ายจะถูกปฏิเสธว่าเซ็นเซอร์ถูกบัง
+//   2. ดับเฉพาะตอนไม่มีจานไหนจ่ายอยู่ (ไม่มีใครอ่านเซ็นเซอร์แล้ว) ไม่อย่างนั้นจังหวะแสงดับ
+//      จะถูกนับเป็นเม็ดยาหนึ่งเม็ด
+bool laserLit = false;
+
+/** สั่ง relay ผ่าน PCF8574: ขาอื่นปล่อยเป็น HIGH (ค่าปกติของชิป) คืน false ถ้าชิปไม่ตอบ */
+bool laserWrite(bool on)
+{
+  const uint8_t mask = static_cast<uint8_t>(1U << LASER_PCF_BIT);
+  const bool pinHigh = on != LASER_SWITCH_ACTIVE_LOW;
+  Wire.beginTransmission(LASER_PCF8574_ADDRESS);
+  Wire.write(pinHigh ? 0xFF : static_cast<uint8_t>(0xFF & ~mask));
+  if (Wire.endTransmission() == 0)
+    return true;
+  Serial.printf("[เลเซอร์] ไม่พบ PCF8574 ที่ 0x%02X เปิด-ปิดเลเซอร์ไม่ได้ ตรวจสายและจั๊มเปอร์ A0-A2\n",
+                LASER_PCF8574_ADDRESS);
+  return false;
+}
+
+/** เปิดเลเซอร์แล้วรอให้นิ่ง ถ้าติดอยู่แล้ว (มีจานอื่นจ่ายอยู่) ไม่ต้องรอซ้ำ */
+void laserEnsureOn()
+{
+  if (!ENABLE_LASER_SWITCH || !ENABLE_PILL_SENSOR || laserLit)
+    return;
+  // ชิปไม่ตอบ: เลเซอร์ไม่ติด ตัวรับจะเห็นมืด แล้วการจ่ายถูกปฏิเสธว่าเซ็นเซอร์ถูกบัง ซึ่งปลอดภัยกว่าจ่ายแบบนับไม่ได้
+  if (!laserWrite(true))
+    return;
+  laserLit = true;
+  // block ได้: ตอนเลเซอร์ดับไม่มีจานไหนทำงานอยู่ จึงไม่มีเซ็นเซอร์หรือ servo ต้องดูแลระหว่างรอ
+  delay(LASER_SETTLE_MS);
+}
+
+/** ดับเลเซอร์เมื่อไม่มีจานไหนจ่ายอยู่แล้ว */
+void laserOffIfIdle()
+{
+  if (!ENABLE_LASER_SWITCH || !laserLit || activeCount() > 0)
+    return;
+  laserWrite(false);
+  laserLit = false;
+}
+
+// ---------------------------------------------------------------------------
+// แยกเม็ดยาออกจากสัญญาณรบกวน
+// ---------------------------------------------------------------------------
+//
+// "การผ่าน" หนึ่งครั้ง = ช่วงที่ลำแสงถูกบัง รวมช่วงโล่งสั้นๆ ที่ตามมา
+//   - โล่งไม่ถึง PILL_DETECT_LOCKOUT_MS แล้วถูกบังอีก = เม็ดเดิมที่กระเด้ง หมุนตัว หรือขอบเม็ดสั่น
+//     นับรวมเป็นการผ่านเดียว
+//   - นับเป็นเม็ดเมื่อเวลาที่ถูกบังรวมทั้งการผ่านถึง PILL_MIN_BLOCK_US
+//     สัญญาณแวบสั้นกว่านั้น (ไฟกระชาก ฝุ่น แสงสะท้อน) ไม่นับ
+//     ใช้เวลารวม ไม่ใช่ช่วงยาวสุด เพราะเม็ดที่ขอบสั่นจะตัดลำแสงเป็นหลายท่อนสั้นๆ
+//   - ถูกบังค้างนานถึง PILL_JAM_MS = มีเม็ดติดขวางลำแสง หยุดจ่ายทันที
+//     ไม่อย่างนั้นเครื่องมองไม่เห็นเม็ดถัดไป แล้วหมุนปล่อยยาเกินจำนวน
+constexpr uint32_t MERGE_GAP_US = PILL_DETECT_LOCKOUT_MS * 1000UL;
+
+/** เริ่มนับใหม่: ทิ้งขอบเก่า (ตอนเลเซอร์ติด/ดับ หรือระหว่างรอออกตัว) แล้วตั้งสถานะจากระดับจริง */
+void resetDetector(uint8_t index)
+{
+  EdgeQueue &queue = edgeQueues[index];
+  queue.tail = queue.head;
+  queue.overflow = false;
+
+  Run &run = runs[index];
+  run.beamBlocked = readSensor(index);
+  run.inPass = false;
+  run.passCounted = false;
+  run.blockedUsInPass = 0;
+  run.jammed = false;
+  run.blockStartUs = run.lastClearUs = static_cast<uint32_t>(micros());
+}
+
+void countPill(uint8_t index)
+{
+  Run &run = runs[index];
+  run.passCounted = true;
+  if (run.countedPills < 255)
+    ++run.countedPills;
+
+  Serial.printf("[เซ็นเซอร์] จาน %u ตรวจพบเม็ดที่ %u/%u (บังลำแสงรวม %lu us)\n",
+                static_cast<unsigned>(index + 1),
+                static_cast<unsigned>(run.countedPills),
+                static_cast<unsigned>(run.requestedPills),
+                static_cast<unsigned long>(run.blockedUsInPass));
+
+  if (run.countedPills >= run.requestedPills)
+    run.targetReached = true;
+}
+
+void handleEdge(uint8_t index, const SensorEdge &edge)
+{
+  Run &run = runs[index];
+  if (edge.blocked)
+  {
+    if (run.beamBlocked)
+      return;  // ขอบซ้ำ (ระดับเดิม) ไม่มีอะไรเปลี่ยน
+    // โล่งนานพอแล้ว = เม็ดใหม่ ถ้าโล่งแค่แวบเดียว = ยังเป็นเม็ดเดิม
+    if (!run.inPass || edge.atUs - run.lastClearUs >= MERGE_GAP_US)
+    {
+      run.inPass = true;
+      run.passCounted = false;
+      run.blockedUsInPass = 0;
+    }
+    run.beamBlocked = true;
+    run.blockStartUs = edge.atUs;
+    return;
+  }
+
+  if (!run.beamBlocked)
+    return;
+  run.beamBlocked = false;
+  run.blockedUsInPass += edge.atUs - run.blockStartUs;
+  run.lastClearUs = edge.atUs;
+  if (!run.passCounted && run.blockedUsInPass >= PILL_MIN_BLOCK_US)
+    countPill(index);
+}
+
+/** อ่านขอบที่ interrupt จดไว้ แล้วตัดสินว่ามีเม็ดยาผ่านไหม ทุกจานแยกกันจึงไม่กวนกัน */
+void pollSensor(uint8_t index)
 {
   if (!ENABLE_PILL_SENSOR)
     return;
 
+  EdgeQueue &queue = edgeQueues[index];
+  while (queue.tail != queue.head)
+  {
+    const SensorEdge edge = queue.items[queue.tail];
+    queue.tail = static_cast<uint8_t>((queue.tail + 1) % EDGE_QUEUE_SIZE);
+    handleEdge(index, edge);
+  }
+
   Run &run = runs[index];
-  const bool blocked = readSensor(index);
-  const bool wasBlocked = run.sensorWasBlocked;
-  run.sensorWasBlocked = blocked;
-
-  if (!blocked || wasBlocked)
-    return;
-  if (now - run.lastDetectMs < PILL_DETECT_LOCKOUT_MS)
-    return;
-
-  run.lastDetectMs = now;
-  if (run.countedPills < 255)
-    ++run.countedPills;
-
-  Serial.printf("[IR] จาน %u ตรวจพบเม็ดที่ %u/%u\n",
-                static_cast<unsigned>(index + 1),
-                static_cast<unsigned>(run.countedPills),
-                static_cast<unsigned>(run.requestedPills));
-
-  if (run.countedPills >= run.requestedPills)
+  if (queue.overflow)
+  {
+    // ขอบหายไปบางส่วน: บอกไม่ได้แล้วว่าช่วงที่หายไปมีเม็ดผ่านกี่เม็ด
+    // เดาเอาไม่ได้ทั้งสองทาง: เติมระดับจริงลงไปจะยืดสัญญาณรบกวนจนนับเป็นเม็ด
+    // ทิ้งไปเฉยๆ อาจทำเม็ดจริงหาย แล้วเครื่องหมุนปล่อยยาเกินจำนวน จึงหยุดจานนี้ไว้ก่อน
+    // (ได้ไม่ครบจะถูกรายงานให้ผู้ใช้เห็น ซึ่งปลอดภัยกว่าให้ยาเกิน)
+    queue.overflow = false;
+    Serial.printf("[เซ็นเซอร์] จาน %u สัญญาณรบกวนถี่จนคิวเต็ม หยุดจ่าย ตรวจสายและการเล็งเลเซอร์\n",
+                  static_cast<unsigned>(index + 1));
+    run.beamBlocked = readSensor(index);
+    run.inPass = false;
+    run.passCounted = false;
+    run.blockedUsInPass = 0;
+    run.blockStartUs = run.lastClearUs = static_cast<uint32_t>(micros());
     run.targetReached = true;
+    return;
+  }
+
+  const uint32_t nowUs = static_cast<uint32_t>(micros());
+  if (run.beamBlocked)
+  {
+    const uint32_t blockedFor = nowUs - run.blockStartUs;
+    // ยังบังอยู่แต่นานพอแล้ว: นับเลยไม่ต้องรอให้โล่ง จานจะได้หยุดหมุนเร็วขึ้น
+    if (!run.passCounted && run.blockedUsInPass + blockedFor >= PILL_MIN_BLOCK_US)
+      countPill(index);
+    if (!run.jammed && blockedFor >= PILL_JAM_MS * 1000UL)
+    {
+      run.jammed = true;
+      run.targetReached = true;  // พาจานกลับตำแหน่งพักแล้วจบ ห้ามปล่อยยาเพิ่มขณะมองไม่เห็น
+      Serial.printf("[เซ็นเซอร์] จาน %u ลำแสงถูกบังค้างเกิน %lu ms มีเม็ดยาติด หยุดจ่าย\n",
+                    static_cast<unsigned>(index + 1), static_cast<unsigned long>(PILL_JAM_MS));
+    }
+  }
+  else if (run.inPass && nowUs - run.lastClearUs >= MERGE_GAP_US)
+  {
+    run.inPass = false;  // โล่งนานพอแล้ว การผ่านนี้จบ
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +381,7 @@ void finishRun(uint8_t index, bool cancelled)
   if (dispenserServos[index].attached())
     dispenserServos[index].detach();
   run.phase = Phase::Idle;
+  laserOffIfIdle();
 
   DispenseOutcome outcome;
   outcome.dispenser = static_cast<uint8_t>(index + 1);
@@ -258,12 +442,15 @@ void updateRun(uint8_t index, unsigned long now)
   if (run.phase == Phase::WaitingStart) {
     if (now - run.phaseStartedMs >= run.startDelayMs) {
       if (ENABLE_PILL_SENSOR && readSensor(index)) finishRun(index, false);
-      else beginPhase(index, Phase::Releasing, now);
+      else {
+        if (ENABLE_PILL_SENSOR) resetDetector(index);
+        beginPhase(index, Phase::Releasing, now);
+      }
     }
     return;
   }
   tickKick(index, now);
-  pollSensor(index, now);
+  pollSensor(index);
 
   const unsigned long elapsed = now - run.phaseStartedMs;
 
@@ -395,7 +582,17 @@ void dispenserControlBegin()
     // GPIO34-39 เป็นขาอินพุตอย่างเดียวและ **ไม่มี pull-up ในตัวชิป**
     // โมดูล IR ต้องขับสัญญาณเองแบบ push-pull ไม่อย่างนั้นต้องใส่ตัวต้านทาน pull-up ภายนอก
     pinMode(PILL_SENSOR_PINS[index], INPUT);
-    runs[index].sensorWasBlocked = ENABLE_PILL_SENSOR ? readSensor(index) : false;
+    if (ENABLE_PILL_SENSOR)
+      attachInterruptArg(digitalPinToInterrupt(PILL_SENSOR_PINS[index]), onSensorEdge,
+                         reinterpret_cast<void *>(static_cast<uintptr_t>(index)), CHANGE);
+  }
+
+  // PCF8574 เริ่มทำงานด้วยทุกขาเป็น HIGH (relay ดับ) อยู่แล้ว สั่งซ้ำไว้เผื่อชิปค้างสถานะจากก่อนรีเซ็ต
+  // (รีเซ็ต ESP32 อย่างเดียวไม่ได้ตัดไฟชิป) ต้องทำหลัง Wire.begin() ซึ่งอยู่ใน setup()
+  if (ENABLE_LASER_SWITCH)
+  {
+    laserWrite(false);
+    laserLit = false;
   }
 
   outcomeHead = 0;
@@ -440,13 +637,21 @@ DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills, int8_t preferr
   if (running >= MAX_CONCURRENT_DISPENSERS)
     return DispenseResult::Busy;
 
+  // ต้องเปิดเลเซอร์ก่อนอ่าน ไม่อย่างนั้นตัวรับไม่เห็นแสงและรายงานว่าถูกบังทุกครั้ง
+  laserEnsureOn();
   if (ENABLE_PILL_SENSOR && readSensor(index))
+  {
+    laserOffIfIdle();
     return DispenseResult::SensorBlocked;
+  }
 
   Servo &servo = dispenserServos[index];
   servo.attach(SERVO_PINS[index], SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
   if (!servo.attached())
+  {
+    laserOffIfIdle();
     return DispenseResult::ServoError;
+  }
 
   Run &run = runs[index];
   run.requestedPills = pills;
@@ -473,14 +678,10 @@ DispenseResult dispenseMedicine(uint8_t dispenser, uint8_t pills, int8_t preferr
 
   const unsigned long now = millis();
 
-  // ช่วงกันนับซ้ำมีไว้กันเม็ดเดียวถูกนับหลายครั้ง จึงต้องนับจากเม็ดก่อนหน้า "ในรอบนี้"
-  // ถ้าปล่อยให้ค้างจากรอบก่อน (หรือค้างที่ 0 ตอนเพิ่งบูต) เม็ดแรกของรอบจะถูกกลืนหายไป
-  run.lastDetectMs = now - PILL_DETECT_LOCKOUT_MS - 1;
-
-  // อ่านสถานะเริ่มต้นไว้ ไม่งั้นถ้าลำแสงถูกบังค้างอยู่ตั้งแต่ต้น
-  // ขอบขาลงแรกจะถูกนับทั้งที่ไม่มีเม็ดยาตกใหม่
+  // เริ่มตัวนับของรอบนี้ใหม่: ทิ้งขอบค้างจากรอบก่อนและจากตอนเลเซอร์เพิ่งติด
+  // ไม่อย่างนั้นแสงดับตอนจบรอบก่อน หรือแสงติดตอนนี้ จะถูกนับเป็นเม็ดยา
   if (ENABLE_PILL_SENSOR)
-    run.sensorWasBlocked = readSensor(index);
+    resetDetector(index);
 
   if (running == 0)
   {
@@ -543,6 +744,9 @@ bool pillSensorBlocked(uint8_t dispenser)
   if (!ENABLE_PILL_SENSOR)
     return false;
   if (dispenser < 1 || dispenser > DISPENSER_COUNT)
+    return false;
+  // เลเซอร์ดับอยู่ (ไม่ได้จ่ายยา) ตัวรับไม่เห็นแสงจึงอ่านได้ว่าถูกบังเสมอ ค่านั้นไม่มีความหมาย
+  if (ENABLE_LASER_SWITCH && !laserLit)
     return false;
   return readSensor(static_cast<uint8_t>(dispenser - 1));
 }

@@ -4,6 +4,7 @@
 #include "software_clock.h"
 
 #include <DS1307RTC.h>
+#include <Preferences.h>
 #include <LiquidCrystal_I2C.h>
 #include <TimeLib.h>
 #include <Wire.h>
@@ -15,9 +16,65 @@ LiquidCrystal_I2C lcdMedicine(LCD_MEDICINE_ADDRESS, LCD_MEDICINE_COLS, LCD_MEDIC
 tmElements_t currentTime;
 bool clockValid = false;
 SoftwareClock softwareClock;
+
+// เวลาล่าสุดที่รู้แน่ว่าถูก (จาก server หรือ RTC ที่ผ่านการตรวจแล้ว) เก็บข้ามการรีบูต
+// ใช้จับ RTC ที่หยุดเดินตอนไม่มีไฟ: เปิดเครื่องมาแล้วบอกเวลาก่อนค่านี้ = ผิดแน่นอน
+Preferences clockStore;
+bool clockStoreOpened = false;
+bool clockStoreReady = false;
+uint32_t trustedFloor = 0;
+uint32_t floorSaved = 0;
+bool rtcLostTime = false;  // เจอ RTC ย้อนหลังในรอบบูตนี้
+// อ่าน RTC ครั้งล่าสุดได้เวลาที่ใช้ได้ไหม (ชิปอยู่และเดิน แต่เวลาเป็นค่าขยะ/ก่อนปี 2024 = false)
+bool rtcHadTime = false;
+// Wi-Fi ต่ออยู่ไหม (pill_app บอกมา) ใช้เลือกคำแนะนำตอนยังไม่มีเวลา
+bool networkOnline = false;
+// server ยืนยันเวลาแล้วในรอบบูตนี้หรือยัง
+// DS1307 ที่หยุดเดินตอนไม่มีไฟจะค้างที่เวลาตอนถอดปลั๊ก เครื่องตรวจเองไม่ได้ (ไม่มีอะไรนับเวลาต่อ
+// ตอนไม่มีไฟ และ DS1307 ไม่มีธงบอกว่าออสซิลเลเตอร์เคยหยุด) จึงต้องบอกผู้ใช้ว่ายังไม่ได้ยืนยัน
+bool timeVerified = false;
+// ตอนเปิดเครื่องครั้งล่าสุด RTC คลาดจาก server เกินหนึ่งนาทีไหม (เก็บข้ามรีบูต)
+// ดูจากครั้งล่าสุดเท่านั้น เปลี่ยนถ่านแล้วเปิดเครื่องที่เวลาถูก ข้อความเตือนหายเอง
+uint32_t rtcWasOff = 0;
+
+void ensureClockStore()
+{
+  if (clockStoreOpened)
+    return;
+  clockStoreOpened = true;
+  clockStoreReady = clockStore.begin("pillclock", false);
+  if (clockStoreReady)
+  {
+    trustedFloor = floorSaved = clockStore.getULong("floor", 0);
+    rtcWasOff = clockStore.getULong("rtcoff", 0);
+  }
+}
+
+/**
+ * จดว่าเวลานี้ถูกแน่นอน
+ * authoritative (มาจาก server) = เชื่อแม้ถอยหลัง เช่นเปลี่ยน timezone บนเว็บ หรือ RTC เคยเดินเร็วไป
+ */
+void noteTrustedTime(uint32_t epoch, bool authoritative)
+{
+  if (!SoftwareClock::validEpoch(epoch))
+    return;
+  if (!authoritative && epoch <= trustedFloor)
+    return;
+  const bool movedDown = epoch < trustedFloor;
+  trustedFloor = epoch;
+  const uint32_t sinceSave = epoch > floorSaved ? epoch - floorSaved : floorSaved - epoch;
+  if (clockStoreReady && (movedDown || sinceSave >= CLOCK_FLOOR_SAVE_INTERVAL_S))
+  {
+    clockStore.putULong("floor", epoch);
+    floorSaved = epoch;
+  }
+}
 const char *clockSource = "WAITING";
 bool timeLcdPresent = false, medicineLcdPresent = false, rtcPresent = false;
 unsigned long lastRefreshMs = 0;
+// ครั้งแรกต้องอ่านเสมอ: หน้ารายงานตอนบูตเรียกก่อน millis() ถึง 1000 ถ้าโดนกันถี่ไว้
+// จะไม่ได้อ่าน RTC เลย แล้วรายงาน "RTC RUNNING" ทั้งที่ RTC ไม่มีเวลาให้
+bool refreshedOnce = false;
 
 // จำข้อความที่แสดงอยู่จริงของแต่ละบรรทัด เพื่อเขียนเฉพาะบรรทัดที่เปลี่ยน
 // การเขียนทับทุกบรรทัดทุกรอบทำให้จอกะพริบและกินเวลาบัส I2C โดยเปล่าประโยชน์
@@ -230,10 +287,12 @@ void rtcLcdBegin()
 
 void rtcLcdUpdate()
 {
-  if (millis() - lastRefreshMs < 1000)
+  if (refreshedOnce && millis() - lastRefreshMs < 1000)
     return;
 
+  refreshedOnce = true;
   lastRefreshMs = millis();
+  ensureClockStore();
 
   const uint32_t fallback = softwareClock.localEpoch(millis());
   tmElements_t rtcTime = {};
@@ -243,12 +302,27 @@ void rtcLcdUpdate()
       rtcTime.Hour < 24 && rtcTime.Minute < 60 && rtcTime.Second < 60;
   const uint32_t rtcEpoch = rtcFieldsValid ? static_cast<uint32_t>(makeTime(rtcTime)) : 0;
   const uint32_t drift = rtcEpoch > fallback ? rtcEpoch - fallback : fallback - rtcEpoch;
+  // เปิดเครื่องมาแล้ว RTC บอกเวลาย้อนหลัง = นาฬิกาหยุดเดินตอนไม่มีไฟ ห้ามใช้
+  // ถ้าใช้ไป เครื่องจะจ่ายยาตามเวลาที่ผิด และมื้อที่ถูกตัดสินผิดว่า "พลาด" จะไม่เตือนอีกทั้งวัน
+  const bool rtcEpochValid = rtcRead && SoftwareClock::validEpoch(rtcEpoch);
+  rtcHadTime = rtcEpochValid;
+  const bool rtcPlausible =
+      rtcEpochValid && rtcTimeIsPlausible(rtcEpoch, trustedFloor, RTC_BACKWARD_TOLERANCE_S);
+  if (rtcEpochValid && !rtcPlausible && !rtcLostTime)
+  {
+    rtcLostTime = true;
+    Serial.printf("[Clock] RTC บอกเวลาย้อนหลังไป %lu วินาที: นาฬิกาหยุดเดินตอนไม่มีไฟ "
+                  "(ถ่านสำรองหมด?) ไม่ใช้เวลานี้ รอเวลาจาก server\n",
+                  static_cast<unsigned long>(trustedFloor - rtcEpoch));
+  }
+
   // A stale RTC that failed to accept the server time must not override it.
-  if (rtcRead && SoftwareClock::validEpoch(rtcEpoch) && (!fallback || drift <= 5)) {
+  if (rtcPlausible && (!fallback || drift <= 5)) {
     currentTime = rtcTime;
     softwareClock.sync(rtcEpoch, millis());
     clockValid = true;
     clockSource = "RTC";
+    noteTrustedTime(rtcEpoch, false);
   } else if (SoftwareClock::validEpoch(fallback)) {
     breakTime(fallback, currentTime);
     clockValid = true;
@@ -256,8 +330,9 @@ void rtcLcdUpdate()
   } else {
     clockValid = false;
     clockSource = "WAITING";
-    writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], "WAIT FOR TIME");
-    writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], "CONNECT WI-FI");
+    writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], rtcLostTime ? "RTC LOST TIME" : "WAIT FOR TIME");
+    // ต่อ Wi-Fi แล้วอย่าบอกให้ต่อ Wi-Fi อีก ผู้ใช้จะเข้าใจผิดว่าเน็ตมีปัญหา
+    writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], networkOnline ? "GETTING TIME" : "CONNECT WI-FI");
     return;
   }
 
@@ -275,7 +350,9 @@ void rtcLcdUpdate()
            currentTime.Hour,
            currentTime.Minute,
            currentTime.Second,
-           strcmp(clockSource, "RTC") == 0 ? "" : "  NO BAT");
+           strcmp(clockSource, "RTC") != 0 ? "  NO BAT"
+           : timeVerified                  ? ""
+                                           : " UNSYNC");  // เวลาจาก RTC ที่ server ยังไม่ยืนยัน
 
   writeLineIfChanged(lcdTime, 0, LCD_TIME_COLS, shownTime[0], clockValid ? line1 : "SET CLOCK FIRST");
   writeLineIfChanged(lcdTime, 1, LCD_TIME_COLS, shownTime[1], line2);
@@ -287,6 +364,26 @@ void rtcSyncFromEpoch(uint32_t localEpoch)
   const uint32_t previous = rtcLocalEpoch();
   const uint32_t drift = previous > localEpoch ? previous - localEpoch : localEpoch - previous;
   const bool wasUsingRtc = strcmp(clockSource, "RTC") == 0;
+  ensureClockStore();
+  noteTrustedTime(localEpoch, true);
+  // ครั้งแรกที่ server ยืนยันเวลาในรอบบูตนี้: RTC ที่ใช้มาตั้งแต่เปิดเครื่องถูกไหม
+  if (!timeVerified && wasUsingRtc)
+  {
+    const uint32_t wasOff = drift > 60 ? 1 : 0;
+    if (wasOff)
+      Serial.printf("[Clock] เปิดเครื่องมาเวลาใน RTC คลาดจาก server %lu วินาที แก้ให้แล้ว "
+                    "นาฬิกาน่าจะหยุดเดินตอนไม่มีไฟ ตรวจถ่านสำรอง\n",
+                    static_cast<unsigned long>(drift));
+    if (wasOff != rtcWasOff && clockStoreReady)
+      clockStore.putULong("rtcoff", wasOff);  // เขียนเฉพาะตอนผลเปลี่ยน
+    rtcWasOff = wasOff;
+  }
+  else if (wasUsingRtc && drift > 60)
+  {
+    Serial.printf("[Clock] เวลาใน RTC คลาดจาก server %lu วินาที แก้ให้แล้ว\n",
+                  static_cast<unsigned long>(drift));
+  }
+  timeVerified = true;
   softwareClock.sync(localEpoch, millis());
   breakTime(localEpoch, currentTime);
   clockValid = true;
@@ -303,6 +400,20 @@ void rtcSyncFromEpoch(uint32_t localEpoch)
 }
 
 bool rtcIsPresent() { return rtcPresent; }
+
+bool rtcLostTimeDetected() { return rtcLostTime; }
+
+bool rtcTimeVerified() { return timeVerified; }
+
+bool rtcHasTime() { return rtcHadTime; }
+
+void rtcSetNetworkOnline(bool online) { networkOnline = online; }
+
+bool rtcWasOffAtLastBoot()
+{
+  ensureClockStore();
+  return rtcWasOff != 0;
+}
 
 bool rtcOscillatorHalted()
 {

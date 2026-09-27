@@ -13,6 +13,16 @@ int claimCode = 200, requestedSync = 0, claimCalls = 0;
 void appStatusJson(String &) {}
 int netSyncCompleteSetup(const char *) { ++claimCalls; return claimCode; }
 void netSyncRequestNow() { ++requestedSync; }
+uint32_t fakeClock = 0;  // 0 = กล่องยังไม่มีเวลา
+bool rtcIsValid() { return fakeClock != 0; }
+uint32_t rtcLocalEpoch() { return fakeClock; }
+void rtcSyncFromEpoch(uint32_t epoch) { if (SoftwareClock::validEpoch(epoch)) fakeClock = epoch; }
+void postTime(const char *value, const char *withNonce = nullptr, bool automatic = false) {
+  server.args["nonce"] = withNonce ? withNonce : nonce;
+  server.args["local_epoch"] = value;
+  server.args["auto"] = automatic ? "1" : "";
+  handleSetTime();
+}
 
 void submit(const char *ssid, const char *password, const char *token) {
   server.args["nonce"] = nonce;
@@ -137,5 +147,52 @@ int main() {
   assert(storage.bytes == previousSettings);
   assert(wifiStartSetup());
   assert(storage.bytes == previousSettings);
+
+  // ---- ตั้งเวลาตามมือถือจากหน้าตั้งค่า (ไม่ต้องมีเน็ต ไม่ต้องต่อคอม) ----
+  handleSetupStatus();
+  assert(server.lastCode == 200);
+  const int syncBeforeTime = requestedSync;
+  postTime("1790449393", "stale-nonce"); assert(server.lastCode == 403 && fakeClock == 0);
+  postTime(""); assert(server.lastCode == 400);
+  postTime("12abc"); assert(server.lastCode == 400);
+  postTime("-5"); assert(server.lastCode == 400 && fakeClock == 0);
+  postTime("946684800"); assert(server.lastCode == 400 && fakeClock == 0);  // ปี 2000: มือถือตั้งเวลาผิด
+  postTime("99999999999"); assert(server.lastCode == 400 && fakeClock == 0);
+  postTime("1790449393"); assert(server.lastCode == 200 && fakeClock == 1790449393);
+  assert(requestedSync == syncBeforeTime + 1);
+  // มี Wi-Fi บันทึกไว้แล้ว: ตั้งเวลาเสร็จกลับไปแสดงตารางยาเอง แม้มือถือยังเปิดหน้าค้างไว้ (โพลอยู่)
+  assert(saved.magic == WIFI_MAGIC && wifiSetupActive());
+  fakeTime += SETUP_RESULT_GRACE_MS / 2; handleSetupStatus(); wifiWebLoop(); assert(wifiSetupActive());
+  fakeTime += SETUP_RESULT_GRACE_MS / 2 + 1; handleSetupStatus(); wifiWebLoop(); assert(!wifiSetupActive());
+  // หน้าเว็บตั้งเวลาให้เองตอนเปิดหน้า: ต้องไม่ปิดโหมดตั้งค่า ผู้ใช้อาจเปิดมาเพื่อตั้ง Wi-Fi
+  assert(wifiStartSetup());
+  postTime("1790449450", nullptr, true); assert(server.lastCode == 200 && fakeClock == 1790449450);
+  fakeTime += SETUP_RESULT_GRACE_MS + 1; wifiWebLoop(); assert(wifiSetupActive());
+  closeSetup();
+  // ตั้งเวลาแล้วต่อด้วยตั้ง Wi-Fi ใหม่: ห้ามปิดทับระหว่างกรอก
+  assert(wifiStartSetup());
+  postTime("1790449400"); assert(server.lastCode == 200);
+  submit("Other", "password", "0123456789ABCDEF0123"); wifiWebLoop();
+  fakeTime += SETUP_RESULT_GRACE_MS + 1; wifiWebLoop(); assert(wifiSetupActive());
+  startPending = connecting = false;
+  // ยังไม่มี Wi-Fi บันทึกไว้: ผู้ใช้ยังต้องตั้ง Wi-Fi ต่อ ห้ามปิดเอง
+  const auto keepSaved = saved; saved = {};
+  postTime("1790449500"); assert(server.lastCode == 200);
+  fakeTime += SETUP_RESULT_GRACE_MS + 1; wifiWebLoop(); assert(wifiSetupActive());
+  saved = keepSaved;
+  // นอกโหมดตั้งค่า (เช่นคนในเครือข่ายบ้าน) เปลี่ยนเวลาไม่ได้ เพราะเวลาคุมการจ่ายยา
+  closeSetup(); fakeClock = 0;
+  postTime("1790449393"); assert(server.lastCode == 403 && fakeClock == 0);
+
+  // ---- ปุ่ม "เสร็จแล้ว": กลับไปทำงานปกติเลย ไม่ต้องรอหมดเวลา ----
+  assert(wifiStartSetup());
+  server.args["nonce"] = "stale"; handleClose(); assert(server.lastCode == 403);
+  submit("Home", "password", "0123456789ABCDEF0123");
+  server.args["nonce"] = nonce; handleClose(); assert(server.lastCode == 409);  // กำลังเชื่อม Wi-Fi อยู่
+  startPending = connecting = false;
+  handleClose(); assert(server.lastCode == 200 && wifiSetupActive());  // ให้คำตอบถึงมือถือก่อน
+  const int syncBeforeClose = requestedSync;
+  fakeTime += 1501; wifiWebLoop();
+  assert(!wifiSetupActive() && requestedSync == syncBeforeClose + 1);
   return 0;
 }

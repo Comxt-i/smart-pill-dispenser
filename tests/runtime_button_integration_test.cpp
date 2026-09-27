@@ -56,13 +56,19 @@ void dispenserHomeAll() {}
 const char *doseStateName(DoseState) { return ""; }
 void netSyncBegin() {}
 void netSyncService() {}
-void netSyncPump() {}
+int pumpCalls = 0;
+void netSyncPump() { ++pumpCalls; }
+bool netSyncFirstSyncFinished() { return false; }
+bool flashStoreBegin() { return true; }
 bool netSyncApplyCachedSchedule() { return false; }
 void scheduleCacheBegin() {}
 void scheduleCacheMarkClosed(const char*, uint32_t) {}
 bool scheduleCacheIsClosed(const char*, uint32_t) { return false; }
 uint32_t scheduleDayKey() { return 20260925; }
 bool netSyncLastCallOk() { return true; }
+unsigned long netSyncLastOkMs() { return millis(); }
+const char *netSyncLastErrorShort() { return ""; }
+bool netSyncJobBusy() { return false; }
 const char *netSyncLastError() { return ""; }
 const char *netSyncConfigVersion() { return ""; }
 void rtcLcdBegin() {}
@@ -75,6 +81,10 @@ const char *wifiSetupStatusShort() { return "OPEN"; }
 bool wifiHasSavedNetwork() { return true; }
 const char *wifiSavedSsid() { return "Home"; }
 bool rtcIsPresent() { return true; }
+bool rtcLostTimeDetected() { return false; }
+bool rtcWasOffAtLastBoot() { return false; }
+bool rtcHasTime() { return true; }
+void rtcSetNetworkOnline(bool) {}
 bool rtcOscillatorHalted() { return false; }
 uint8_t i2cFoundCount() { return 0; }
 uint8_t i2cFoundAddress(uint8_t) { return 0; }
@@ -242,4 +252,13 @@ int main() {
   suppliedOutcome = {1, 2, 1, 1, false, true}; outcomeReady = true;
   handleDispenseOutcome();
   assert(testDose.state == DoseState::Failed && strstr(lastEvent.note, "1/2"));
+
+  // ปุ่มเขียวอ่านว่ากดค้าง (ปุ่มค้าง/สายหลวม): เครื่องต้องยังคุยกับ server ต่อ
+  // เดิมรอให้ปล่อยปุ่มก่อน ถ้าค้างตลอด เว็บเห็นกล่อง OFFLINE และตารางไม่อัปเดตอีกเลย
+  resetCase(); busy = false; inSetup = false; testDose.state = DoseState::Done; runOwner[0] = RunOwner::None;
+  press(ButtonId::Dispense);
+  pumpCalls = 0;
+  appLoop(); appLoop();
+  assert(buttonHeld(ButtonId::Dispense) && pumpCalls == 2);
+  release(ButtonId::Dispense);
 }
