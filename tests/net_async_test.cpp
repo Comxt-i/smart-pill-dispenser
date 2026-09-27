@@ -180,7 +180,7 @@ int main()
   int requestsBefore = fakeHttp.requests;
   netSyncPump();
   assert(fakeHttp.requests == requestsBefore + 1);
-  assert(lastUrlHas("/api/device/wait?state=abc12345&timeout_sec=15"));
+  assert(lastUrlHas("/api/device/wait?state=abc12345&timeout_sec=25"));
   // HTTP timeout ต้องยาวกว่าที่ server ถือสายไว้ ไม่งั้นกล่องตัดสายเองก่อน server ตอบ
   assert(job.timeoutMs > WAIT_TIMEOUT_SEC * 1000UL);
   netSyncPump();  // มีงานค้าง: ห้ามเปิดสายซ้อน

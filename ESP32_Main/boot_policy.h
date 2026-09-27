@@ -20,3 +20,12 @@ inline bool shouldUseCachedSchedule(bool clockValid,
     return false;  // ไม่รู้วันที่ก็เลือกมื้อของวันนี้ไม่ได้ / มีตารางแล้ว / ลองไปแล้ว
   return firstSyncFinished || msSinceBoot >= serverWaitMs;
 }
+
+/**
+ * ตารางยาบนเครื่องอาจเก่าแล้วไหม: sync สำเร็จครั้งล่าสุดนานเกิน staleMs
+ * lastOkMs = 0 คือยังไม่เคยสำเร็จเลยตั้งแต่เปิดเครื่อง นับจากตอนเปิดเครื่องแทน
+ */
+inline bool scheduleIsStale(unsigned long lastOkMs, unsigned long nowMs, unsigned long staleMs)
+{
+  return lastOkMs == 0 ? nowMs >= staleMs : nowMs - lastOkMs >= staleMs;
+}

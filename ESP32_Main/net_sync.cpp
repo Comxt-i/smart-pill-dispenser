@@ -31,6 +31,8 @@ int tzOffsetMinutes = 420;
 bool lastCallOk = false;
 // ภาษาไทยใช้ 3 ไบต์ต่อตัวอักษรใน UTF-8 ข้อความไม่ยาวก็เต็ม 64 ไบต์แล้ว รหัส HTTP ท้ายข้อความจะถูกตัดทิ้ง
 char lastError[128] = "ยังไม่ได้เชื่อมต่อ";
+// ข้อความเดียวกันแบบสั้นภาษาอังกฤษ สำหรับจอ LCD ที่แสดงภาษาไทยไม่ได้ ("" = ยังไม่เคยล้มเหลว)
+char lastErrorShort[24] = "";
 char configVersion[12] = "";
 // จาก sync ล่าสุด ส่งกลับไปที่ /wait ให้ server รู้ว่ากล่องเห็นข้อมูลรุ่นไหนอยู่
 char stateVersion[12] = "";
@@ -69,20 +71,30 @@ bool usesTls()
  */
 bool systemClockReadyForTls()
 {
-  if (time(nullptr) > MIN_VALID_EPOCH)
-    return true;
-
-  // ตั้งจาก RTC ก่อน เพราะได้ทันทีโดยไม่ต้องรอเครือข่าย
+  // นาฬิการะบบต้องตามเวลาของเครื่องเสมอ ไม่ใช่ตั้งครั้งเดียวตอนบูตแล้วปล่อยค้าง
+  // เดิมตั้งเฉพาะตอนยังไม่มีเวลาเลย: ถ้าบูตมาด้วยเวลา RTC ที่ผิด (ถ่านหมด) แล้วผู้ใช้แก้เวลา
+  // จากมือถือทีหลัง นาฬิกาเครื่องถูกแล้วแต่นาฬิการะบบยังผิดอยู่ ใบรับรองไม่ผ่านตลอด
+  // เครื่องต่อ Wi-Fi ได้แต่คุยกับ server ไม่ได้เลย (และ server ไม่เห็นอะไรใน log เพราะตกตั้งแต่ TLS)
   const uint32_t localEpoch = rtcLocalEpoch();
   if (localEpoch > 0)
   {
     // นาฬิกาของระบบเก็บเป็น UTC ส่วน RTC เก็บเวลาท้องถิ่น จึงต้องถอย offset ออก
-    timeval now = {};
-    now.tv_sec = static_cast<time_t>(localEpoch) - tzOffsetMinutes * 60;
-    settimeofday(&now, nullptr);
-    Serial.println("[TLS] ตั้งนาฬิการะบบจาก DS1307 เพื่อใช้ตรวจใบรับรอง");
+    const time_t fromDevice = static_cast<time_t>(localEpoch) - tzOffsetMinutes * 60;
+    const time_t system = time(nullptr);
+    const time_t drift = system > fromDevice ? system - fromDevice : fromDevice - system;
+    if (system <= MIN_VALID_EPOCH || drift > TLS_CLOCK_RESYNC_S)
+    {
+      timeval now = {};
+      now.tv_sec = fromDevice;
+      settimeofday(&now, nullptr);
+      Serial.printf("[TLS] ตั้งนาฬิการะบบตามเวลาเครื่อง (เดิมคลาด %ld วินาที) เพื่อใช้ตรวจใบรับรอง\n",
+                    static_cast<long>(system <= MIN_VALID_EPOCH ? 0 : drift));
+    }
     return true;
   }
+
+  if (time(nullptr) > MIN_VALID_EPOCH)
+    return true;
 
   if (!ntpStarted)
   {
@@ -502,6 +514,15 @@ void describeFailure(const char *what, int code)
   else
     // รหัสขึ้นก่อนเสมอ ต่อให้ข้อความถูกตัดก็ยังเห็นสาเหตุ
     snprintf(lastError, sizeof(lastError), "HTTP %d: %s ล้มเหลว", code, what);
+  // รหัสติดลบของ HTTPClient = ต่อไม่ถึง server (DNS, TLS/ใบรับรอง, หมดเวลา) บวก = server ตอบกลับมา
+  if (code == JOB_ERR_NO_WIFI)
+    snprintf(lastErrorShort, sizeof(lastErrorShort), "WIFI DROP");
+  else if (code == JOB_ERR_CLOCK)
+    snprintf(lastErrorShort, sizeof(lastErrorShort), "NO CLOCK");
+  else if (code < 0)
+    snprintf(lastErrorShort, sizeof(lastErrorShort), "CONN %d", code);
+  else
+    snprintf(lastErrorShort, sizeof(lastErrorShort), "HTTP %d", code);
   Serial.printf("[net] %s\n", lastError);
 }
 }
@@ -895,6 +916,16 @@ unsigned long netSyncLastOkMs()
 const char *netSyncLastError()
 {
   return lastError;
+}
+
+const char *netSyncLastErrorShort()
+{
+  return lastErrorShort;
+}
+
+bool netSyncJobBusy()
+{
+  return jobState.load() != JOB_IDLE;
 }
 
 const char *netSyncConfigVersion()

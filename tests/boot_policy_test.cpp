@@ -18,5 +18,13 @@ int main()
   assert(!shouldUseCachedSchedule(false, false, false, true, 60000, WAIT));
   // ลองไปแล้วครั้งหนึ่ง: ไม่อ่านแฟลชซ้ำทุกรอบ loop
   assert(!shouldUseCachedSchedule(true, false, true, true, 60000, WAIT));
+
+  // ตารางบนจออาจเก่า: sync ไม่สำเร็จนานเกินกำหนด
+  const unsigned long STALE = 720000;
+  assert(!scheduleIsStale(0, STALE - 1, STALE));       // เพิ่งเปิดเครื่อง ยังไม่ถึงเวลาเตือน
+  assert(scheduleIsStale(0, STALE, STALE));            // เปิดมานานแล้วยังไม่เคย sync สำเร็จ
+  assert(!scheduleIsStale(5000, 5000 + STALE - 1, STALE));
+  assert(scheduleIsStale(5000, 5000 + STALE, STALE));
+  assert(!scheduleIsStale(4294960000UL, 1000, STALE));  // millis วนรอบ 49 วัน ไม่เตือนผิด
   return 0;
 }

@@ -1,6 +1,18 @@
 #pragma once
 #include <stdint.h>
 
+/**
+ * เวลาจริงไม่มีทางเดินถอยหลัง
+ *
+ * RTC ที่บอกเวลาก่อน "เวลาล่าสุดที่รู้แน่ว่าถูก" เกินค่าเผื่อ = นาฬิกาหยุดเดินตอนไม่มีไฟ
+ * (ถ่านสำรองหมด หรือโมดูล Tiny RTC ใส่ CR2032 กับวงจรชาร์จ) ห้ามเชื่อเวลานั้น
+ * trustedFloor = 0 คือเครื่องใหม่ที่ยังไม่เคยรู้เวลาที่ถูก จึงยังตรวจไม่ได้
+ */
+inline bool rtcTimeIsPlausible(uint32_t rtcEpoch, uint32_t trustedFloor, uint32_t toleranceSec)
+{
+  return trustedFloor == 0 || rtcEpoch + toleranceSec >= trustedFloor;
+}
+
 // A volatile local-time clock. Reboot requires a new server sync or a valid RTC.
 class SoftwareClock {
  public:

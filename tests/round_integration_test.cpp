@@ -2,10 +2,12 @@
 #include <vector>
 #include <string>
 #include <ESP32Servo.h>
+#include <Wire.h>
 #include "../ESP32_Main/buttons.cpp"
 #include "../ESP32_Main/pill_app.cpp"
 SerialClass Serial;
 WiFiClass WiFi;
+TwoWire Wire;  // ตัวคุมจานสั่ง relay เลเซอร์ผ่าน PCF8574 บนบัสนี้
 std::vector<Pulse> pulses;
 int attachedCount = 0;
 bool failAttach = false;
@@ -17,6 +19,13 @@ std::vector<PendingEvent> savedEvents;
 std::vector<std::string> reservedKeys;
 const char *rejectKey = "";
 unsigned long millis() { return nowMs; }
+unsigned long extraUs = 0;
+unsigned long micros() { return nowMs * 1000UL + extraUs; }
+void (*sensorIsr[64])(void *) = {};
+void *sensorIsrArg[64] = {};
+void attachInterruptArg(uint8_t pin, void (*handler)(void *), void *arg, int) { sensorIsr[pin] = handler; sensorIsrArg[pin] = arg; }
+/** เปลี่ยนระดับขาแบบฮาร์ดแวร์จริง: interrupt ที่ผูกไว้ทำงานทันที */
+void drive(uint8_t pin, int level) { if (levels[pin] == level) return; levels[pin] = level; if (sensorIsr[pin]) sensorIsr[pin](sensorIsrArg[pin]); }
 void pinMode(uint8_t, uint8_t) {}
 int digitalRead(uint8_t pin) { return levels[pin]; }
 void digitalWrite(uint8_t pin, int value) { (void)pin; (void)value; }
@@ -53,6 +62,9 @@ void scheduleCacheMarkClosed(const char *id, uint32_t) { closedIds.push_back(id)
 bool isClosed(const char *id) { for (const auto &c : closedIds) if (c == id) return true; return false; }
 bool scheduleCacheIsClosed(const char *id, uint32_t) { return isClosed(id); }
 bool netSyncLastCallOk() { return true; }
+unsigned long netSyncLastOkMs() { return millis(); }
+const char *netSyncLastErrorShort() { return ""; }
+bool netSyncJobBusy() { return false; }
 const char *netSyncLastError() { return ""; }
 const char *netSyncConfigVersion() { return ""; }
 void rtcLcdBegin() {}
@@ -65,6 +77,10 @@ const char *wifiSetupStatusShort() { return "OPEN"; }
 bool wifiHasSavedNetwork() { return true; }
 const char *wifiSavedSsid() { return "Home"; }
 bool rtcIsPresent() { return true; }
+bool rtcLostTimeDetected() { return false; }
+bool rtcWasOffAtLastBoot() { return false; }
+bool rtcHasTime() { return true; }
+void rtcSetNetworkOnline(bool) {}
 bool rtcOscillatorHalted() { return false; }
 uint8_t i2cFoundCount() { return 0; }
 uint8_t i2cFoundAddress(uint8_t) { return 0; }
@@ -100,8 +116,9 @@ void tick(uint32_t ms = 1) { nowMs += ms; appLoop(); }
 void press(uint8_t pin) { levels[pin]=LOW; tick(); tick(BUTTON_DEBOUNCE_MS); }
 void release(uint8_t pin) { levels[pin]=HIGH; tick(); tick(BUTTON_DEBOUNCE_MS); }
 void drop(uint8_t slot) {
-  levels[PILL_SENSOR_PINS[slot-1]]=LOW; tick();
-  levels[PILL_SENSOR_PINS[slot-1]]=HIGH; tick();
+  // เม็ดบังลำแสงไม่กี่มิลลิวินาที จับได้ด้วย interrupt แม้ loop ไม่ได้วนระหว่างนั้น
+  drive(PILL_SENSOR_PINS[slot-1], LOW); extraUs += 3000;
+  drive(PILL_SENSOR_PINS[slot-1], HIGH); tick();
 }
 size_t pulseCount(uint8_t slot) {
   size_t n=0; for (const auto &p:pulses) if (p.pin==SERVO_PINS[slot-1]) ++n; return n;

@@ -10,6 +10,9 @@ WiFiClass WiFi;
 void appStatusJson(String &) {}
 int netSyncCompleteSetup(const char *) { return 200; }
 void netSyncRequestNow() {}
+bool rtcIsValid() { return false; }
+uint32_t rtcLocalEpoch() { return 0; }
+void rtcSyncFromEpoch(uint32_t) {}
 
 int main() {
   wifiWebBegin();

@@ -870,6 +870,7 @@ void showSetupScreen()
 void updateDisplay()
 {
   const bool online = WiFi.status() == WL_CONNECTED;
+  rtcSetNetworkOnline(online);
 
   // ข้อความตอบรับการกดปุ่ม แสดงสั้นๆ แล้วกลับไปหน้าปกติ
   if (static_cast<long>(noticeUntilMs - millis()) > 0 && lastNotice[0] != '\0')
@@ -886,7 +887,9 @@ void updateDisplay()
 
   if (!rtcIsValid())
   {
-    lcdShowMessage("Clock not set", online ? "Syncing..." : "No Wi-Fi");
+    // ได้เวลาจากเน็ตปกติใช้ไม่กี่วินาที เกินนั้นบอกทางตั้งเองจากมือถือ (กดปุ่มเขียวค้าง -> หน้าตั้งค่า)
+    const bool stillTrying = online && millis() < CLOCK_HINT_AFTER_MS;
+    lcdShowMessage("Clock not set", stillTrying ? "Getting time..." : "Hold GREEN 3s");
     return;
   }
 
@@ -967,10 +970,24 @@ void updateDisplay()
   else
     snprintf(hintA, sizeof(hintA), "All done today");
 
-  if (online)
+  // ต่อ Wi-Fi อยู่แต่ sync ไม่สำเร็จมานาน: ตารางบนจออาจไม่ตรงกับที่แก้บนเว็บ ผู้ใช้ต้องรู้
+  // (sync ครั้งแรกยังไม่เคยสำเร็จ นับจากเปิดเครื่อง)
+  const unsigned long lastOkMs = netSyncLastOkMs();
+  const bool scheduleStale = scheduleIsStale(lastOkMs, millis(), SCHEDULE_STALE_MS);
+  const char *serverError = netSyncLastErrorShort();
+  const bool serverFailing = !netSyncLastCallOk() && serverError[0] != '\0';
+  if (online && !scheduleStale && !serverFailing)
   {
     const char *hints[1] = {hintA};
     lcdSetMedicineScreen(lines, LCD_MEDICINE_ROWS, hints, 1);
+  }
+  else if (online)
+  {
+    // ต่อ Wi-Fi แล้วแต่ server ไม่ตอบ: บอกรหัสเหตุผลบนจอเลย ไม่ต้องต่อคอมดู Serial
+    snprintf(hintB, sizeof(hintB), "%s", scheduleStale ? "NO SERVER - old list" : "SERVER ERROR");
+    snprintf(hintC, sizeof(hintC), "ERR %s", serverError[0] ? serverError : "NO REPLY");
+    const char *hints[3] = {hintA, hintB, hintC};
+    lcdSetMedicineScreen(lines, LCD_MEDICINE_ROWS, hints, 3);
   }
   else
   {
@@ -1041,9 +1058,13 @@ void showBootReport()
   static char i2cLine[21], wifiLine[LCD_MARQUEE_MAX_TEXT], resetLine[21];
   snprintf(i2cLine, sizeof(i2cLine), "I2C:%s", found);
   // สามสถานะนี้แก้คนละวิธี จึงต้องแยกให้ออกบนจอ ไม่ใช่รวมเป็น "error" เดียว
-  const char *rtcState = !rtcIsPresent()      ? "RTC MISSING"
-                       : rtcOscillatorHalted() ? "RTC HALTED-BATT"
-                                               : "RTC RUNNING";
+  rtcLcdUpdate();  // อ่านนาฬิกาหนึ่งรอบก่อน จะได้รู้ว่า RTC บอกเวลาย้อนหลังหรือเปล่า
+  const char *rtcState = !rtcIsPresent()        ? "RTC MISSING"
+                       : rtcOscillatorHalted()   ? "RTC HALTED-BATT"
+                       : rtcLostTimeDetected()   ? "RTC LOST TIME"
+                       : !rtcHasTime()           ? "RTC NO TIME"  // ชิปเดินแต่ไม่มีเวลาที่ใช้ได้
+                       : rtcWasOffAtLastBoot()   ? "RTC CHECK BATT"
+                                                 : "RTC RUNNING";
   snprintf(wifiLine, sizeof(wifiLine), "WIFI:%s",
            wifiHasSavedNetwork() ? wifiSavedSsid() : "NOT SAVED");
   snprintf(resetLine, sizeof(resetLine), "RST:%s", resetReasonText());
@@ -1144,9 +1165,10 @@ void appLoop()
 
   // A short button press above may have started motion in this same iteration.
   if (dispenserIsBusy()) { alertUpdate(); return; }
-  // Keep reading the hold gesture promptly; defer network work until release.
   // ทุกอย่างในนี้ไม่ block แล้ว: การรับส่งจริงอยู่ใน task เบื้องหลัง ตรงนี้แค่ส่งงานกับรับผล
-  if (!buttonHeld(ButtonId::Dispense))
+  // จึงไม่ต้องรอให้ปล่อยปุ่มเขียวก่อน (เดิมรอ) ถ้าปุ่มค้างหรือสายหลวมจนอ่านว่ากดอยู่ตลอด
+  // เครื่องจะไม่คุยกับ server อีกเลย: ต่อ Wi-Fi ได้แต่เว็บเห็น OFFLINE และตารางไม่อัปเดต
+  // ส่วนที่ขยับกลไก (คำสั่งจากเว็บด้านล่าง) ยังรอให้ปล่อยปุ่มเหมือนเดิม
   {
     netSyncService();  // ผลที่เสร็จแล้ว (ตารางใหม่ เวลา คำสั่ง) นำไปใช้ตรงนี้
 
@@ -1263,6 +1285,17 @@ void appStatusJson(String &out)
   out += "\"sync_error\":\"" + String(netSyncLastError()) + "\",";
   out += "\"config_version\":\"" + String(netSyncConfigVersion()) + "\",";
   out += "\"pending_events\":" + String(eventQueueSize()) + ",";
+  // ไล่ปัญหา "ต่อ Wi-Fi ได้แต่เว็บ OFFLINE" จากมือถือได้โดยไม่ต้องต่อคอม
+  out += "\"sync_error_short\":\"" + String(netSyncLastErrorShort()) + "\",";
+  out += "\"last_sync_ok_age_s\":" +
+         String(netSyncLastOkMs() ? static_cast<long>((millis() - netSyncLastOkMs()) / 1000UL) : -1L) + ",";
+  out += "\"net_job_busy\":" + String(netSyncJobBusy() ? "true" : "false") + ",";
+  out += "\"setup_active\":" + String(wifiSetupActive() ? "true" : "false") + ",";
+  out += "\"pending_doses\":" + String(pendingDoseCount) + ",";
+  // ปุ่มที่อ่านได้ว่า "กดอยู่" ตอนนี้ ถ้าไม่ได้กดแต่ขึ้น true = ปุ่มค้างหรือสายหลวม
+  out += "\"buttons_held\":{\"green\":" + String(buttonHeld(ButtonId::Dispense) ? "true" : "false") +
+         ",\"yellow\":" + String(buttonHeld(ButtonId::Snooze) ? "true" : "false") +
+         ",\"red\":" + String(buttonHeld(ButtonId::Cancel) ? "true" : "false") + "},";
 
   // รายการ address ที่เจอบนบัส I2C ใช้ไล่ปัญหาจอไม่ขึ้นโดยไม่ต้องเสียบ USB
   out += "\"i2c_found\":[";
@@ -1289,12 +1322,13 @@ void appStatusJson(String &out)
     out += diag;
   }
   {
-    char expected[48];
+    char expected[64];
     snprintf(expected,
              sizeof(expected),
-             "\"i2c_expected\":[\"0x%02X\",\"0x%02X\",\"0x68\"],",
+             "\"i2c_expected\":[\"0x%02X\",\"0x%02X\",\"0x68\",\"0x%02X\"],",
              LCD_TIME_ADDRESS,
-             LCD_MEDICINE_ADDRESS);
+             LCD_MEDICINE_ADDRESS,
+             LASER_PCF8574_ADDRESS);  // ชิปคุม relay เลเซอร์
     out += expected;
   }
   out += "\"slots\":[";

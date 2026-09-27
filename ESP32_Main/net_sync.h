@@ -69,6 +69,10 @@ bool netSyncTakeCommand(RemoteCommand &command);
 bool netSyncLastCallOk();
 unsigned long netSyncLastOkMs();
 const char *netSyncLastError();
+/** เหตุล้มเหลวล่าสุดแบบสั้นภาษาอังกฤษ ("CONN -1", "HTTP 401", "NO CLOCK") สำหรับจอ LCD */
+const char *netSyncLastErrorShort();
+/** มีงานเครือข่ายค้างอยู่ (รอผลหรือรอ loop หลักรับผล) ใช้ไล่ปัญหาจากหน้าสถานะ */
+bool netSyncJobBusy();
 const char *netSyncConfigVersion();
 
 /** Complete a logged-in setup session using the hardware API key. Returns HTTP status or 0 while waiting for TLS. */
