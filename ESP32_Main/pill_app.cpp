@@ -251,6 +251,7 @@ const char *describe(DispenseResult result)
     case DispenseResult::ServoError: return "ต่อ Servo ไม่สำเร็จ";
     case DispenseResult::SensorBlocked: return "ตัวรับไม่เห็นแสงเลเซอร์ (มีของขวาง เล็งไม่ตรง หรือตัวรับไม่มีไฟ)";
     case DispenseResult::LaserOff: return "สั่งเปิดเลเซอร์ไม่ได้ PCF8574 ไม่ตอบ ตรวจสาย I2C และไฟเลี้ยง";
+    case DispenseResult::SensorUnstable: return "ลำแสงไม่นิ่ง ตัวรับเห็นแสงบ้างไม่เห็นบ้าง เล็งจุดแสงให้กลางตัวรับและยึดให้แน่น";
   }
   return "ไม่ทราบผล";
 }
@@ -273,6 +274,7 @@ const char *reasonCode(DispenseResult result)
     case DispenseResult::Cancelled: return "cancel held";
     case DispenseResult::SensorBlocked: return "no laser beam at sensor";  // ช่องบันทึกยาว 32 ตัว
     case DispenseResult::LaserOff: return "laser switch no reply";
+    case DispenseResult::SensorUnstable: return "unstable laser beam";
     case DispenseResult::ServoError: return "servo attach failed";
   }
   return "unknown";
@@ -334,6 +336,7 @@ bool startDoseDispense(const DoseRef &ref)
     showNotice(result == DispenseResult::Disabled      ? "SERVO DISABLED"
                : result == DispenseResult::LaserOff      ? "LASER FAULT"
                : result == DispenseResult::SensorBlocked ? "NO LASER BEAM"
+               : result == DispenseResult::SensorUnstable ? "BEAM UNSTABLE"
                                                          : "DISPENSE FAILED");
 
     dose->state = DoseState::Failed;
@@ -349,7 +352,33 @@ bool startDoseDispense(const DoseRef &ref)
     if (!dose->failureReported)
     {
       dose->failureReported = true;
-      reportDose(ref, "FAILED", reasonCode(result));
+      // เซ็นเซอร์ไม่พร้อม: แนบผลนับตอนตรวจ dN = อ่านได้ HIGH กี่ครั้งตอนเลเซอร์ดับ, lN = ตอนติด (จาก 20)
+      // ดูจากมือถือได้เลยว่าเสียแบบไหน: dN = lN คือค่าไม่เปลี่ยน, lN กลางๆ คือแสงกะพริบ
+      // จานที่ตรวจผ่านแต่ยังถูกปฏิเสธ = มีของขวางลำแสงอยู่ตอนเริ่ม
+      // จานที่ตรวจไม่ผ่านใช้คำเดียวกับบนจอตอนเปิดเครื่อง เช่น "light w/o laser d20 l20"
+      char note[32];
+      uint8_t darkHigh = 0;
+      uint8_t litHigh = 0;
+      if ((result == DispenseResult::SensorBlocked || result == DispenseResult::SensorUnstable) &&
+          pillSensorReads(slot->number, darkHigh, litHigh))
+      {
+        char fault[24] = "beam blocked at start";
+        const char *hint = pillSensorFaultHint(slot->number);
+        if (hint)
+        {
+          size_t i = 0;
+          for (; hint[i] && i < sizeof(fault) - 1; ++i)
+            fault[i] = static_cast<char>(tolower(static_cast<unsigned char>(hint[i])));
+          fault[i] = '\0';
+        }
+        else if (pillSensorStatus(slot->number) != 1)
+          snprintf(fault, sizeof(fault), "%s", reasonCode(result));
+        snprintf(note, sizeof(note), "%s d%u l%u", fault, static_cast<unsigned>(darkHigh),
+                 static_cast<unsigned>(litHigh));
+      }
+      else
+        snprintf(note, sizeof(note), "%s", reasonCode(result));
+      reportDose(ref, "FAILED", note);
     }
     return true;
   }
@@ -453,8 +482,10 @@ void acceptRound()
     pendingDoseId[pendingDoseCount][sizeof(pendingDoseId[0]) - 1] = '\0';
     ++pendingDoseCount;
     if (details < 2)
-      snprintf(detail[details++], sizeof(detail[0]), "%.15s x%u", slot->name,
-               static_cast<unsigned>(pillsFor(slot->amountPerDose)));
+      // H = ช่องปล่อยยาที่จะลองก่อน นับ 1-4 ตามขนาดยาบนเว็บ (ไม่ได้กรอกขนาด = เริ่มช่อง 1)
+      snprintf(detail[details++], sizeof(detail[0]), "%.12s x%u H%u", slot->name,
+               static_cast<unsigned>(pillsFor(slot->amountPerDose)),
+               static_cast<unsigned>(slot->pillHole >= 0 ? slot->pillHole + 1 : 1));
   }
 
   if (pendingDoseCount > 0)
@@ -572,6 +603,19 @@ void handleDispenseOutcome()
   // ไม่ได้ตรวจด้วย IR = รู้แค่ว่าสั่งหมุนไปแล้ว ยืนยันไม่ได้ว่าเม็ดยาออกมาจริง
   // ต้องติดป้ายไว้ในบันทึก เพื่อไม่ให้ประวัติหลอกว่ายืนยันแล้ว
   const char *const unverified = outcome.sensorVerified ? nullptr : "unverified";
+  // จ่ายครบก็แนบสถิติไว้ ใช้จูนเกณฑ์นับเม็ดจากของจริง: min = เม็ดที่บังลำแสงสั้นที่สุดที่นับได้
+  // b = ช่วงบังที่ไม่ถึงเกณฑ์กี่ครั้ง ตามด้วยนานสุด เช่น "ok 5/5 a3 min620us b1 120us"
+  // สั้นสุด-ยาวสุดของเม็ดที่นับได้ (ยาวกว่าสั้นสุดหลายเท่า = ยาตกติดกันเป็นก้อน) เช่น "ok 3/3 a7 8424-9102us"
+  char okNote[32];
+  if (outcome.uncountedBlocks)
+    snprintf(okNote, sizeof(okNote), "ok %u/%u a%u %lu-%luus b%u", outcome.dispensedPills,
+             outcome.requestedPills, outcome.attempts, static_cast<unsigned long>(outcome.shortestCountedUs),
+             static_cast<unsigned long>(outcome.longestCountedUs), outcome.uncountedBlocks);
+  else
+    snprintf(okNote, sizeof(okNote), "ok %u/%u a%u %lu-%luus", outcome.dispensedPills, outcome.requestedPills,
+             outcome.attempts, static_cast<unsigned long>(outcome.shortestCountedUs),
+             static_cast<unsigned long>(outcome.longestCountedUs));
+  const char *const successNote = outcome.sensorVerified ? okNote : unverified;
 
   Serial.printf("[จ่ายยา] ช่อง %u ได้ %u/%u เม็ด (หมุน %u รอบ)%s%s\n",
                 outcome.dispenser,
@@ -599,18 +643,10 @@ void handleDispenseOutcome()
       alertOneShot(AlertPattern::Success);
       statusLedFlash(LedColor::Green);
       showNotice("TAKE YOUR PILLS");
-      if (unverified)
-      {
-        // ต้องแนบหมายเหตุ แต่ onDoseStateChanged ส่ง DISPENSED แบบไม่มีหมายเหตุ
-        // จึงรายงานเองแล้วตั้งสถานะตรงๆ เพื่อไม่ให้ callback ส่งซ้ำอีกใบ
-        // (แพตเทิร์นเดียวกับเส้นทาง dry run ด้านบน)
-        reportDose(ref, "DISPENSED", unverified);
-        dose->state = DoseState::Done;
-      }
-      else
-      {
-        scheduleSetState(ref, DoseState::Done);  // callback จะส่ง DISPENSED ให้เอง
-      }
+      // ต้องแนบหมายเหตุ (สถิติเซ็นเซอร์ หรือ unverified) แต่ onDoseStateChanged ส่ง DISPENSED แบบไม่มีหมายเหตุ
+      // จึงรายงานเองแล้วตั้งสถานะตรงๆ เพื่อไม่ให้ callback ส่งซ้ำอีกใบ (แพตเทิร์นเดียวกับเส้นทาง dry run)
+      reportDose(ref, "DISPENSED", successNote);
+      dose->state = DoseState::Done;
     }
     else
     {
@@ -633,7 +669,7 @@ void handleDispenseOutcome()
     alertOneShot(complete ? AlertPattern::Success : AlertPattern::Warning);
     reportCommand(runningCommand[index],
                   complete ? "DISPENSED" : "FAILED",
-                  complete ? unverified : failureNote);
+                  complete ? successNote : failureNote);
   }
 }
 
@@ -1142,7 +1178,7 @@ void showBootReport()
     {
       auto mark = [](uint8_t dispenser) {
         const int8_t status = pillSensorStatus(dispenser);
-        return status > 0 ? "OK" : status == 0 ? "NO" : "--";
+        return status == 1 ? "OK" : status == 0 ? "NO" : status == 2 ? "??" : "--";  // ?? = แสงกะพริบ
       };
       snprintf(sensorLine, sizeof(sensorLine), "LASER 1:%s 2:%s 3:%s", mark(1), mark(2), mark(3));
     }
@@ -1150,13 +1186,38 @@ void showBootReport()
   Serial.printf("[Boot] %s\n", sensorLine);
 
   const char *lines[3] = {i2cLine, rtcState, wifiLine};
-  const char *hints[2] = {sensorLine, resetLine};
-  lcdSetMedicineScreen(lines, 3, hints, 2);
+  const char *hints[LCD_MAX_HINTS];
+  uint8_t hintCount = 0;
+  hints[hintCount++] = sensorLine;
+
+  // จานที่ตรวจไม่ผ่าน: บอกบนจอว่าเสียแบบไหน พร้อมผลนับดิบ (HIGH กี่ครั้งจาก 20 ตอนเลเซอร์ดับ/ติด)
+  // จอมีบรรทัดเดียวที่สลับข้อความ จึงโชว์แค่จานแรกที่เสีย จานอื่นดูได้จาก Serial และ /status
+  static char faultLine[21], readsLine[21];
+  for (uint8_t dispenser = 1; dispenser <= DISPENSER_COUNT; ++dispenser)
+  {
+    const char *fault = pillSensorFaultHint(dispenser);
+    uint8_t darkHigh = 0;
+    uint8_t litHigh = 0;
+    if (!fault || !pillSensorReads(dispenser, darkHigh, litHigh))
+      continue;
+    snprintf(faultLine, sizeof(faultLine), "L%u %s", static_cast<unsigned>(dispenser), fault);
+    snprintf(readsLine, sizeof(readsLine), "L%u OFF:%u ON:%u /%u", static_cast<unsigned>(dispenser),
+             static_cast<unsigned>(darkHigh), static_cast<unsigned>(litHigh),
+             static_cast<unsigned>(LASER_CHECK_SAMPLES));
+    Serial.printf("[Boot] %s | %s\n", faultLine, readsLine);
+    hints[hintCount++] = faultLine;
+    hints[hintCount++] = readsLine;
+    break;
+  }
+  hints[hintCount++] = resetLine;
+  lcdSetMedicineScreen(lines, 3, hints, hintCount);
 
   // lcdSetMedicineScreen แค่เก็บข้อความลง buffer ตัวที่เขียนลงจอจริงคือ lcdMedicineTick()
   // ซึ่งปกติถูกเรียกจาก appLoop() ที่ยังไม่เริ่มทำงานตอนนี้
   // ถ้า delay() เฉยๆ จอจะว่างตลอดแล้วถูก appLoop เขียนทับทันที
-  const unsigned long until = millis() + BOOT_REPORT_SCREEN_MS;
+  // ข้อความบรรทัดล่างสลับทุก LCD_HINT_INTERVAL_MS: ค้างหน้านี้นานพอให้เห็นครบทุกข้อความ
+  const unsigned long cycleMs = hintCount * LCD_HINT_INTERVAL_MS + 500;
+  const unsigned long until = millis() + (cycleMs > BOOT_REPORT_SCREEN_MS ? cycleMs : BOOT_REPORT_SCREEN_MS);
   while (static_cast<long>(millis() - until) < 0)
   {
     lcdMedicineTick();
@@ -1370,10 +1431,25 @@ void appStatusJson(String &out)
   out += "\"net_job_busy\":" + String(netSyncJobBusy() ? "true" : "false") + ",";
   out += "\"setup_active\":" + String(wifiSetupActive() ? "true" : "false") + ",";
   out += "\"pending_doses\":" + String(pendingDoseCount) + ",";
-  // เซ็นเซอร์เลเซอร์: ดูจากมือถือได้ ไม่ต้องต่อคอม (1 = ใช้ได้, 0 = ไม่เห็นแสง, -1 = ยังไม่ได้ตรวจ)
+  // เซ็นเซอร์เลเซอร์: ดูจากมือถือได้ ไม่ต้องต่อคอม (1 = ใช้ได้, 0 = ไม่เห็นแสง, 2 = แสงกะพริบ, -1 = ยังไม่ได้ตรวจ)
   out += "\"laser_switch_ok\":" + String(laserSwitchResponding() ? "true" : "false") + ",";
   out += "\"laser_sensors\":[" + String(pillSensorStatus(1)) + "," + String(pillSensorStatus(2)) + "," +
          String(pillSensorStatus(3)) + "],";
+  // ผลนับตอนตรวจ "มืด/สว่าง" ของแต่ละจาน (HIGH กี่ครั้งจาก 20) -1 = ยังไม่ได้ตรวจ
+  {
+    String darkList;
+    String litList;
+    for (uint8_t dispenser = 1; dispenser <= DISPENSER_COUNT; ++dispenser)
+    {
+      uint8_t darkHigh = 0;
+      uint8_t litHigh = 0;
+      const bool known = pillSensorReads(dispenser, darkHigh, litHigh);
+      const char *sep = dispenser > 1 ? "," : "";
+      darkList += sep + String(known ? static_cast<int>(darkHigh) : -1);
+      litList += sep + String(known ? static_cast<int>(litHigh) : -1);
+    }
+    out += "\"laser_dark_high\":[" + darkList + "],\"laser_lit_high\":[" + litList + "],";
+  }
   // ปุ่มที่อ่านได้ว่า "กดอยู่" ตอนนี้ ถ้าไม่ได้กดแต่ขึ้น true = ปุ่มค้างหรือสายหลวม
   out += "\"buttons_held\":{\"green\":" + String(buttonHeld(ButtonId::Dispense) ? "true" : "false") +
          ",\"yellow\":" + String(buttonHeld(ButtonId::Snooze) ? "true" : "false") +

@@ -13,7 +13,7 @@ static const char SETUP_PAGE[] PROGMEM = R"HTML(
 <label for="networks">เครือข่าย Wi-Fi ใกล้เคียง</label><select id="networks"><option value="">กำลังค้นหา...</option></select>
 <label for="ssid">ชื่อ Wi-Fi บ้าน (2.4 GHz)</label><input id="ssid" name="ssid" maxlength="32" required autocomplete="off">
 <label for="password">รหัสผ่าน Wi-Fi บ้าน</label><input id="password" name="password" type="password" maxlength="63" autocomplete="new-password"><small>เว้นว่างเฉพาะเครือข่ายที่ไม่มีรหัสผ่าน</small>
-<p id="token-help">รหัสใช้ได้ 5 นาที พิมพ์ตัวเล็กหรือใหญ่ได้ เว้นขีดได้</p><label for="token">รหัสตั้งค่าจากเว็บไซต์ (8 ตัว)</label><input id="token" name="token" aria-describedby="token-help" required minlength="8" maxlength="40" placeholder="ABCD-EFGH" autocomplete="off" autocapitalize="characters" spellcheck="false">
+<label for="token">รหัสตั้งค่าจากเว็บไซต์ (8 ตัว)</label><input id="token" name="token" required minlength="8" maxlength="40" placeholder="ABCD-EFGH" autocomplete="off" autocapitalize="characters" spellcheck="false">
 <button id="connect" type="submit">เชื่อมต่อและจับคู่</button></form>
 <p id="status" role="status">รหัสผ่าน Wi-Fi จะบันทึกในกล่องยา ไม่ส่งขึ้นเว็บไซต์</p>
 <button id="close" type="button" class="secondary">เสร็จแล้ว กลับไปทำงานปกติ</button>

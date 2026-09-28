@@ -9,6 +9,7 @@
 // Required when PILLBOX_PILL_SENSOR is false and real hardware is on.
 #define PILLBOX_ALLOW_UNVERIFIED_DISPENSE false
 #define PILLBOX_REST_PULSES {1500, 1500, 1500}
-// Per plate: {right 90 (<=8mm), right 135 (<=13mm), left 90 (<=15mm), left 135 (<=25mm)}
-#define PILLBOX_HOLE_PULSES {{2167, 2463, 833, 537}, {2167, 2463, 833, 537}, {2167, 2463, 833, 537}}
+// Per plate, ordered by hole size (seen from the front, small holes on the right):
+// {<=8 right 86, <=13 right 130, <=15 left 90, <=25 left 130}; right = pulse below rest
+#define PILLBOX_HOLE_PULSES {{863, 537, 2167, 2463}, {863, 537, 2167, 2463}, {863, 537, 2167, 2463}}
 #define PILLBOX_MOVE_TIME_MS 700

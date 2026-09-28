@@ -3,6 +3,7 @@
 #include <ESP32Servo.h>
 #include <Wire.h>
 #include <climits>
+#include <string>
 
 #ifdef EXPECT_SERVO_MOVEMENT
 // ถ้าไฟล์ตั้งค่าเครื่องไหนสักที่แอบเปลี่ยนโหมด สองรอบของเทสต์จะทดสอบโหมดเดียวกันซ้ำโดยไม่มีใครรู้
@@ -54,6 +55,14 @@ bool laserSettled()
   return laserIsOn() && fakeMillis - Wire.lastAt[LASER_PCF8574_ADDRESS] >= receiverResponseMs;
 }
 
+// ตัวรับจริงไม่ได้มืดทันทีที่เลเซอร์ดับ: ยังเห็นแสงค้างอยู่เท่านี้หลังสั่งดับ
+unsigned long receiverOffLagMs = 0;
+
+bool laserAfterglow()
+{
+  return laserIsOff() && fakeMillis - Wire.lastAt[LASER_PCF8574_ADDRESS] < receiverOffLagMs;
+}
+
 /**
  * ตัวรับเลเซอร์จริง: เลเซอร์ดับหรือยังไม่นิ่ง = ไม่เห็นแสง = อ่านได้ว่าถูกบัง
  * ใช้กับทุกเทสต์ด้านล่าง การจ่ายทุกครั้งในไฟล์นี้จึงพิสูจน์ด้วยว่าเปิดเลเซอร์ก่อนอ่านเซ็นเซอร์
@@ -61,6 +70,9 @@ bool laserSettled()
 bool receiverInverted = false;  // ตัวรับอีกรุ่นที่ให้ขั้วกลับกัน
 int deadReceiver = -1;          // ตัวรับที่เสีย/สายหลุด: ค่าไม่เปลี่ยนเลย (-1 = ไม่มี)
 int deadLevel = HIGH;           // ค่าที่ตัวรับเสียค้างอยู่
+int flickerReceiver = -1;       // จุดแสงค่อนขอบตัวรับ: ตอนเลเซอร์ติดอ่านได้สลับเห็น/ไม่เห็นทุกครั้ง
+unsigned flickerReads = 0;
+int glitchReceiver = -1;        // อ่านได้ค่ากลับด้านหนึ่งครั้ง (GPIO36 ถูกดึงลงแวบหนึ่งตอน Wi-Fi ทำงาน)
 
 int laserReceiverRead(uint8_t pin)
 {
@@ -71,8 +83,15 @@ int laserReceiverRead(uint8_t pin)
     if (static_cast<int>(i) == deadReceiver)
       return deadLevel;
     int level = pinLevel[pin];
-    if (ENABLE_LASER_SWITCH && !laserSettled())
+    if (ENABLE_LASER_SWITCH && !laserSettled() && !laserAfterglow())
       level = PILL_SENSOR_ACTIVE_LOW ? LOW : HIGH;
+    if (static_cast<int>(i) == flickerReceiver && laserSettled() && flickerReads++ % 2)
+      level = PILL_SENSOR_ACTIVE_LOW ? LOW : HIGH;
+    if (static_cast<int>(i) == glitchReceiver)
+    {
+      glitchReceiver = -1;
+      level = !level;
+    }
     return receiverInverted ? !level : level;
   }
   return pinLevel[pin];
@@ -166,12 +185,19 @@ std::vector<int> releasePulses(uint8_t unit)
 unsigned runAttemptsWithoutDrop(unsigned n)
 {
   unsigned done = 0;
-  for (; done < n && dispenserIsBusy(); ++done)
+  while (done < n && dispenserIsBusy())
   {
+    const size_t before = pulses.size();
     advance(MOVE_TIME_MS);   // Releasing -> Returning
     advance(MOVE_TIME_MS);   // Returning -> Shaking
-    advance(SHAKE_TIME_MS);  // Shaking -> ตัดสินผลแล้วหมุนรอบใหม่ หรือจบ
+    advance(SHAKE_TIME_MS);  // Shaking -> ตัดสินผลแล้วหมุนรอบใหม่ หรือเข้าช่วงรอนับเม็ดท้ายรอบ
+    if (pulses.size() == before)
+      break;  // ทั้งรอบไม่มีคำสั่ง servo เลย = ช่วงรอนับเม็ดท้ายรอบ ไม่ใช่รอบหมุน
+    ++done;
   }
+  // รอบหมุนจบแล้วแต่ยังอยู่ในช่วงรอนับเม็ดที่ตกตามมา: รอให้จบ (ถ้ายังหมุนต่อ ช่วงนี้สั้นกว่าการหมุนหนึ่งจังหวะ ไม่ข้ามจังหวะ)
+  if (dispenserIsBusy())
+    advance(PILL_SETTLE_MS);
   return done;
 }
 
@@ -186,7 +212,7 @@ void clearLog()
 
 int main()
 {
-  DispenseOutcome outcome = {0, 0, 0, 0, false, false, StopReason::Done, 0, 0};
+  DispenseOutcome outcome = {0, 0, 0, 0, false, false, StopReason::Done, 0, 0, 0, 0};
 
   resetPins();
   for (uint8_t pin = 0; pin < 64; ++pin)
@@ -220,6 +246,19 @@ int main()
         assert(pulses[i].pin == SERVO_PINS[i] && pulses[i].value == REST_PULSE_US[i]);
       // ทีละจาน: ใช้เวลาเท่ากับหมุนสามครั้งต่อกัน ไม่ใช่พร้อมกัน
       assert(fakeMillis - before == DISPENSER_COUNT * MOVE_TIME_MS);
+      // ช่องเรียงตามขนาด: ช่องเล็ก (<=8, <=13) อยู่ฝั่งพัลส์น้อยกว่าพัก ช่องใหญ่ (<=15, <=25) อยู่ฝั่งมากกว่า
+      // (เคยตั้งกลับข้าง ตั้ง 15 mm แล้วจานไปช่องเล็กสุด) และช่องเล็กสุดหมุนแค่ 86 องศา
+      for (uint8_t i = 0; i < DISPENSER_COUNT; ++i)
+      {
+        auto degrees = [&](uint8_t hole) {
+          return (HOLE_PULSE_US[i][hole] - REST_PULSE_US[i]) * 270.0 / (SERVO_MAX_PULSE_US - SERVO_MIN_PULSE_US);
+        };
+        // มองจากหน้าเครื่อง ช่องเล็กอยู่ทางขวา = พัลส์น้อยกว่าพัก (servo ตัวนี้หมุนกลับทิศกับตัวเลข)
+        assert(degrees(0) < -85.5 && degrees(0) > -86.5);   // <=8mm  ขวา 86
+        assert(degrees(1) < degrees(0));                     // <=13mm ขวาไกลกว่า
+        assert(degrees(2) > 89.5 && degrees(2) < 90.5);     // <=15mm ซ้าย 90
+        assert(degrees(3) > degrees(2));                     // <=25mm ซ้ายไกลกว่า
+      }
       // 135 องศาของ servo 270 องศาคือกึ่งกลางพิสัยพอดี
       assert(REST_PULSE_US[0] * 2 == SERVO_MIN_PULSE_US + SERVO_MAX_PULSE_US);
     }
@@ -299,7 +338,13 @@ int main()
     // ขากลับต้องเบรกล็อกแกน: IN1 = PWM เต็ม และ IN2 = HIGH
     assert(lastVibrationPwm(unit) == 255 && lastVibrationDir(unit) == HIGH);
 
-    advance(MOVE_TIME_MS);  // จบ Returning -> ครบแล้วจึงจบงาน ไม่เข้า Shaking
+    advance(MOVE_TIME_MS);  // จบ Returning -> ครบแล้วไม่เข้า Shaking
+    if (ENABLE_PILL_SENSOR)
+    {
+      // ช่วงรอนับเม็ดที่ตกตามมา: จานอยู่ที่พัก มอเตอร์หยุดสั่น แต่ยังไม่จบงาน
+      assert(dispenserIsBusy() && lastVibrationPwm(unit) == 0);
+      advance(PILL_SETTLE_MS);
+    }
 
     assert(!dispenserIsBusy() && attachedCount == 0);
     assert(lastVibrationPwm(unit) == 0);  // ดับมอเตอร์เมื่อจบงาน
@@ -360,9 +405,10 @@ int main()
     dropPill(2);
     assert(pulseCountFor(2) == 2);
     advance(MOVE_TIME_MS - DISPENSE_STAGGER_MS);
+    advance(PILL_SETTLE_MS);  // จาน 1 รอนับเม็ดที่ตกตามมาเสร็จ จึงคืนที่ว่าง
     assert(dispenserIsBusy() && dispenserHasCapacity());
     assert(dispenseMedicine(3, 1) == DispenseResult::Started);
-    advance(DISPENSE_STAGGER_MS); // Channel 2 finishes; channel 3 starts.
+    advance(PILL_SETTLE_MS); // Channel 2 finishes its settle; channel 3 starts.
 
     assert(takeDispenseOutcome(outcome));
     assert(outcome.dispenser == 1 && outcome.dispensedPills == 1 && !outcome.cancelled);
@@ -443,6 +489,7 @@ int main()
     advance(MOVE_TIME_MS);  // Returning -> Shaking
     dropPill(3);
     advance(SHAKE_TIME_MS);
+    advance(PILL_SETTLE_MS);  // ช่วงรอนับเม็ดที่ตกตามมาท้ายรอบ
     assert(!dispenserIsBusy());
     assert(takeDispenseOutcome(outcome) && outcome.dispensedPills == 1 && outcome.attempts == 3);
     {
@@ -469,6 +516,7 @@ int main()
     advance(PILL_DETECT_LOCKOUT_MS + 1);
     dropPill(1);                 // เม็ดที่สอง ยังที่ช่อง 2 (พลาด 9 รอบยังไม่ครบ 10)
     advance(SHAKE_TIME_MS);
+    advance(PILL_SETTLE_MS);  // ช่วงรอนับเม็ดที่ตกตามมาท้ายรอบ
     assert(!dispenserIsBusy());
     assert(takeDispenseOutcome(outcome) && outcome.dispensedPills == 2);
     {
@@ -584,6 +632,7 @@ int main()
 
   if (ENABLE_PILL_SENSOR)
   {
+    advance(PILL_SETTLE_MS);  // ช่วงรอนับเม็ดท้ายรอบ (ข้ามจุดวนกลับของ millis ด้วย)
     assert(attachedCount == 0);
     assert(takeDispenseOutcome(outcome));
     assert(outcome.dispenser == 3 && outcome.dispensedPills == 1 && !outcome.cancelled);
@@ -727,10 +776,44 @@ int main()
     dispenserSensorSelfTest();
     assert(laserIsOff() && laserSwitchResponding());
     assert(pillSensorStatus(1) == 1 && pillSensorStatus(2) == 1 && pillSensorStatus(3) == 1);
+    assert(pillSensorFaultHint(1) == nullptr && pillSensorFaultHint(3) == nullptr);
     deadReceiver = 2;  // จาน 3 ยังไม่ได้เสียบตัวรับ
     dispenserSensorSelfTest();
     assert(pillSensorStatus(1) == 1 && pillSensorStatus(3) == 0);
+    // จอบอกได้ว่าค้างฝั่งไหน: เห็นแสงตลอด (แสงรอบข้าง/เลเซอร์ต่อไฟตรง) กับไม่เห็นเลเซอร์เลย แก้คนละที่
+    // ต้องถูกทั้งสองขั้วของตัวรับ เพราะ "มืด" ของตัวรับแต่ละรุ่นเป็น HIGH หรือ LOW ก็ได้
+    for (bool inverted : {false, true})
+    {
+      receiverInverted = inverted;
+      const int darkLevel = inverted ? CLEAR_LEVEL : BLOCKED_LEVEL;
+      deadLevel = darkLevel == HIGH ? LOW : HIGH;
+      dispenserSensorSelfTest();
+      assert(pillSensorStatus(3) == 0 && std::string(pillSensorFaultHint(3)) == "LIGHT W/O LASER");
+      assert(pillSensorFaultHint(1) == nullptr);
+      deadLevel = darkLevel;
+      dispenserSensorSelfTest();
+      assert(pillSensorStatus(3) == 0 && std::string(pillSensorFaultHint(3)) == "NEVER SEES LASER");
+    }
+    receiverInverted = false;
     deadReceiver = -1;
+    flickerReceiver = 2;
+    dispenserSensorSelfTest();
+    assert(std::string(pillSensorFaultHint(3)) == "BEAM FLICKERS");
+    flickerReceiver = -1;
+    // เพิ่งเปิดเครื่อง จานที่เสียยังไม่เคยตรวจผ่านเลย ขั้วของมันยังเป็นค่าเดาจาก config
+    // ต้องเทียบกับจานที่ตรวจผ่าน ไม่อย่างนั้นตัวรับรุ่นขั้วกลับจะบอกกลับด้าน (ให้ไปแก้ผิดที่)
+    dispenserControlBegin();
+    receiverInverted = true;
+    deadReceiver = 0;
+    deadLevel = CLEAR_LEVEL;  // ขั้วกลับ: CLEAR_LEVEL คือ "มืด" = ไม่เคยเห็นเลเซอร์
+    dispenserSensorSelfTest();
+    assert(pillSensorStatus(1) == 0 && pillSensorStatus(2) == 1);
+    assert(std::string(pillSensorFaultHint(1)) == "NEVER SEES LASER");
+    deadReceiver = -1;
+    receiverInverted = false;
+    dispenserSensorSelfTest();
+    assert(pillSensorStatus(1) == 1 && pillSensorStatus(2) == 1 && pillSensorStatus(3) == 1);
+    assert(pillSensorFaultHint(0) == nullptr && pillSensorFaultHint(DISPENSER_COUNT + 1) == nullptr);
     assert(pillSensorStatus(0) == -1 && pillSensorStatus(DISPENSER_COUNT + 1) == -1);
     // PCF8574 ไม่ตอบ: จอบอกว่าเป็นที่ชิปคุม relay
     Wire.present = false;
@@ -751,6 +834,68 @@ int main()
     stopDispenser();
     assert(laserIsOff());
     while (takeDispenseOutcome(outcome)) {}
+
+    // ผลนับตอนตรวจของจานที่ปกติ: มืดทุกครั้งตอนดับ สว่างทุกครั้งตอนติด (ส่งขึ้นเว็บให้ไล่ปัญหา)
+    {
+      uint8_t darkHigh = 99;
+      uint8_t litHigh = 99;
+      assert(pillSensorReads(1, darkHigh, litHigh));
+      assert(darkHigh == (BLOCKED_LEVEL == HIGH ? LASER_CHECK_SAMPLES : 0));
+      assert(litHigh == (CLEAR_LEVEL == HIGH ? LASER_CHECK_SAMPLES : 0));
+      assert(!pillSensorReads(0, darkHigh, litHigh) && !pillSensorReads(DISPENSER_COUNT + 1, darkHigh, litHigh));
+    }
+
+    // มื้อเดียวมียาหลายจาน: จานแรกจ่ายเสร็จ เลเซอร์ดับ แล้วจานถัดไปเริ่มทันที
+    // ตัวรับจริงยังเห็นแสงค้างอยู่ครู่หนึ่ง เดิมอ่าน "ตอนมืด" ทันทีได้ค่าเดียวกับตอนสว่าง
+    // แล้วตัดสินผิดว่าจานนั้นไม่เห็นแสง ("no laser beam at sensor") ทั้งที่โค้ดทดสอบนับได้ปกติ
+    receiverOffLagMs = 150;
+    assert(dispenseMedicine(1, 1) == DispenseResult::Started);
+    dropPill(1);
+    for (int i = 0; i < 10 && dispenserIsBusy(); ++i)
+      advance(MOVE_TIME_MS);
+    assert(!dispenserIsBusy() && laserIsOff() && laserAfterglow());
+    assert(takeDispenseOutcome(outcome) && outcome.dispensedPills == 1);
+    {
+      const unsigned long before = fakeMillis;
+      assert(dispenseMedicine(3, 1) == DispenseResult::Started);
+      assert(fakeMillis - before >= receiverOffLagMs);  // รอจนตัวรับมืดจริงก่อนอ่าน
+      assert(fakeMillis - before < receiverOffLagMs + LASER_RESPONSE_TIMEOUT_MS);
+      assert(pillSensorStatus(1) == 1 && pillSensorStatus(3) == 1);
+    }
+    stopDispenser();
+    while (takeDispenseOutcome(outcome)) {}
+    receiverOffLagMs = 0;
+
+    // ขาอ่านได้ค่าผิดแวบเดียวตอนตรวจ (GPIO36 กับ Wi-Fi): อ่านซ้ำแล้วใช้เสียงข้างมาก ไม่ตัดสินว่าจานเสีย
+    advance(1000);
+    glitchReceiver = 2;
+    assert(dispenseMedicine(3, 1) == DispenseResult::Started);
+    assert(glitchReceiver == -1 && pillSensorStatus(3) == 1);  // ถูกอ่านไปแล้วจริง และยังผ่าน
+    stopDispenser();
+    while (takeDispenseOutcome(outcome)) {}
+
+    // จุดแสงค่อนขอบตัวรับ ตอนติดเห็นบ้างไม่เห็นบ้าง: แยกบอกว่า "แสงไม่นิ่ง" ไม่ใช่ "ไม่เห็นแสง" และไม่จ่าย
+    flickerReceiver = 2;
+    clearLog();
+    assert(dispenseMedicine(3, 1) == DispenseResult::SensorUnstable);
+    assert(pulses.empty() && !dispenserIsBusy() && laserIsOff());
+    assert(pillSensorStatus(3) == 2 && pillSensorStatus(1) == 1);
+    {
+      uint8_t darkHigh = 0;
+      uint8_t litHigh = 0;
+      assert(pillSensorReads(3, darkHigh, litHigh));
+      assert(litHigh > LASER_CHECK_SAMPLES - LASER_CHECK_MIN_AGREE && litHigh < LASER_CHECK_MIN_AGREE);
+    }
+    dispenserSensorSelfTest();
+    assert(pillSensorStatus(3) == 2);
+    // จานอื่นยังจ่ายได้
+    assert(dispenseMedicine(1, 1) == DispenseResult::Started);
+    stopDispenser();
+    while (takeDispenseOutcome(outcome)) {}
+    // ยึดให้แน่นแล้ว: ตรวจรอบถัดไปกลับมาใช้ได้เอง
+    flickerReceiver = -1;
+    dispenserSensorSelfTest();
+    assert(pillSensorStatus(3) == 1);
   }
 
   if (ENABLE_SERVO_MOVEMENT && ENABLE_PILL_SENSOR)
@@ -775,12 +920,66 @@ int main()
     assert(countAfter([] { pulseBeam(1, 100); dispenserControlUpdate(); }) == 0);
     assert(countAfter([] { pulseBeam(1, PILL_MIN_BLOCK_US - 1); dispenserControlUpdate(); }) == 0);
     // สถิติบนเว็บ: เซ็นเซอร์เห็นบางอย่างแต่สั้นกว่าเกณฑ์ ("b1 380us") ต่างจาก ไม่เห็นอะไรเลย ("b0")
-    assert(countAfter([] { pulseBeam(1, 380); dispenserControlUpdate(); }) == 0);
-    assert(outcome.uncountedBlocks == 1 && outcome.longestUncountedUs == 380);
-    assert(countAfter([] { pulseBeam(1, 200); advance(PILL_DETECT_LOCKOUT_MS + 1); pulseBeam(1, 300); dispenserControlUpdate(); }) == 0);
-    assert(outcome.uncountedBlocks == 2 && outcome.longestUncountedUs == 300);
+    assert(countAfter([] { pulseBeam(1, 120); dispenserControlUpdate(); }) == 0);
+    assert(outcome.uncountedBlocks == 1 && outcome.longestUncountedUs == 120);
+    assert(countAfter([] { pulseBeam(1, 100); advance(PILL_DETECT_LOCKOUT_MS + 1); pulseBeam(1, 120); dispenserControlUpdate(); }) == 0);
+    assert(outcome.uncountedBlocks == 2 && outcome.longestUncountedUs == 120);
     assert(countAfter([] {}) == 0 && outcome.uncountedBlocks == 0 && outcome.longestUncountedUs == 0);
     assert(countAfter([] { dropPill(1); }) == 1 && outcome.uncountedBlocks == 0);  // เม็ดที่นับแล้วไม่ใช่ "ไม่นับ"
+    assert(outcome.shortestCountedUs == 3000);  // เว็บขึ้น "ok ... min3000us"
+    // เม็ดจริงที่เคยถูกทิ้ง (บันทึก "b1 476us", "b1 135us") ตอนนี้ต้องนับได้
+    assert(countAfter([] { pulseBeam(1, 476); dispenserControlUpdate(); }) == 1);
+    assert(countAfter([] { pulseBeam(1, PILL_MIN_BLOCK_US); dispenserControlUpdate(); }) == 1);
+
+    // ยาหลายเม็ดตกเป็นกลุ่ม ห่างกันไม่กี่ ms (สั่ง 5 ได้ 7 เพราะเคยรวมเป็นเม็ดเดียว): ต้องนับครบทุกเม็ด
+    assert(countAfter([] {
+      for (int i = 0; i < 3; ++i) { pulseBeam(1, 2500); fakeExtraUs += PILL_DETECT_LOCKOUT_MS * 1000UL + 500; }
+      dispenserControlUpdate();
+    }) == 3);
+
+    // เม็ดที่ตกตามมาทีหลัง (ยังกลิ้งอยู่ในรางตอนจานกลับถึงที่พัก): ต้องยังนับได้ ไม่ปิดเลเซอร์ทันที
+    while (takeDispenseOutcome(outcome)) {}
+    assert(dispenseMedicine(1, 1) == DispenseResult::Started);
+    dropPill(1);                 // ครบแล้ว หมุนกลับ
+    advance(MOVE_TIME_MS);       // ถึงที่พัก เข้าช่วงรอนับ
+    assert(dispenserIsBusy());
+    if (ENABLE_LASER_SWITCH) assert(laserIsOn());
+    advance(PILL_SETTLE_MS / 2);
+    dropPill(1);                 // เม็ดที่ตกตามมา
+    advance(PILL_SETTLE_MS);
+    assert(!dispenserIsBusy() && takeDispenseOutcome(outcome));
+    assert(outcome.dispensedPills == 2 && outcome.requestedPills == 1);  // เกินจำนวน ต้องเห็นบนเว็บ ไม่ซ่อน
+    if (ENABLE_LASER_SWITCH) assert(laserIsOff());
+
+    // ช่วงบังยาวผิดปกติ (ยาตกติดกันเป็นก้อน) ต้องเห็นในสถิติ
+    assert(countAfter([] { pulseBeam(1, 38000); dispenserControlUpdate(); }) == 1);
+    assert(outcome.shortestCountedUs == 38000 && outcome.longestCountedUs == 38000);
+    assert(countAfter([] { dropPill(1); fakeExtraUs += PILL_DETECT_LOCKOUT_MS * 1000UL + 500; pulseBeam(1, 9000); dispenserControlUpdate(); }) == 2);
+    assert(outcome.shortestCountedUs == 3000 && outcome.longestCountedUs == 9000);
+
+    // หนามสัญญาณถี่ๆ จากมอเตอร์ (สั้นกว่า PILL_MIN_PIECE_US): ไม่นับ แม้รวมกันนานเกินเกณฑ์
+    assert(countAfter([] {
+      for (int i = 0; i < 20; ++i) { pulseBeam(1, PILL_MIN_PIECE_US - 5); fakeExtraUs += 300; }
+      dispenserControlUpdate();
+    }) == 0);
+    // หนามที่ยังค้างอยู่ตอน loop มาอ่าน ต่อจากช่วงบังที่เกือบถึงเกณฑ์: ห้ามเอามารวมจนนับเป็นเม็ด
+    assert(countAfter([] {
+      pulseBeam(1, PILL_MIN_BLOCK_US - 10);
+      fakeExtraUs += 1000;
+      driveInput(PILL_SENSOR_PINS[0], BLOCKED_LEVEL);
+      fakeExtraUs += PILL_MIN_PIECE_US - 20;
+      dispenserControlUpdate();  // ยังบังอยู่ แค่ 20 us
+      driveInput(PILL_SENSOR_PINS[0], CLEAR_LEVEL);
+      dispenserControlUpdate();
+    }) == 0);
+    // ...และไม่ยืดการผ่านจนสองเม็ดที่มีหนามคั่นถูกรวมเป็นเม็ดเดียว
+    assert(countAfter([] {
+      pulseBeam(1, 2500);
+      for (int i = 0; i < 20; ++i) { fakeExtraUs += 800; pulseBeam(1, 20); dispenserControlUpdate(); }
+      fakeExtraUs += 800;
+      pulseBeam(1, 2500);
+      dispenserControlUpdate();
+    }) == 2);
     assert(countAfter([] { pulseBeam(1, PILL_MIN_BLOCK_US); dispenserControlUpdate(); }) == 1);
 
     // เม็ดที่ขอบสั่น ตัดลำแสงเป็นหลายท่อนสั้นๆ: รวมเวลาแล้วถึงเกณฑ์ = หนึ่งเม็ด ไม่ใช่สามเม็ด
@@ -790,7 +989,7 @@ int main()
     }) == 1);
 
     // กระเด้งกลับมาตัดลำแสงอีกก่อนพ้นช่วงรวม = เม็ดเดิม
-    assert(countAfter([] { dropPill(1); fakeExtraUs += 20000; dropPill(1); }) == 1);
+    assert(countAfter([] { dropPill(1); fakeExtraUs += PILL_DETECT_LOCKOUT_MS * 1000UL - 2000; dropPill(1); }) == 1);
     // เว้นนานพอ = สองเม็ด
     assert(countAfter([] { dropPill(1); advance(PILL_DETECT_LOCKOUT_MS + 1); dropPill(1); }) == 2);
 

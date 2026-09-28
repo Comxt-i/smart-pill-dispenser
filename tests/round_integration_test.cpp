@@ -6,6 +6,7 @@
 #include <Wire.h>
 #include "../ESP32_Main/buttons.cpp"
 #include "../ESP32_Main/pill_app.cpp"
+#include "../ESP32_Main/pill_hole.h"
 SerialClass Serial;
 WiFiClass WiFi;
 TwoWire Wire;  // ตัวคุมจานสั่ง relay เลเซอร์ผ่าน PCF8574 บนบัสนี้
@@ -88,6 +89,7 @@ I2cLineState i2cLastLineState() { return I2cLineState{}; }
 const char *rtcClockSource() { return "RTC"; }
 void wifiWebBegin() {}
 void delay(unsigned long ms) { nowMs += ms; }
+void delayMicroseconds(unsigned int us) { extraUs += us; }
 // หน้าจอตั้งค่าและหน้าวินิจฉัยตอนบูตเรียกสามตัวนี้
 const char *wifiSetupStatusShort() { return "OPEN"; }
 bool wifiHasSavedNetwork() { return true; }
@@ -147,6 +149,7 @@ size_t pulseCount(uint8_t slot) {
   size_t n=0; for (const auto &p:pulses) if (p.pin==SERVO_PINS[slot-1]) ++n; return n;
 }
 Dose &dose(int index) { return *scheduleDoseAt({static_cast<uint8_t>(index),0,true}); }
+int8_t slot1PillHole = PILL_HOLE_ANY;  // hole chosen from the pill size set on the web
 void resetCase() {
   for (int &v:levels) v=HIGH;
   dispenserControlBegin(); buttonsBegin(); scheduleBegin(onDoseStateChanged);
@@ -159,6 +162,7 @@ void resetCase() {
   for (int i=0;i<3;++i) {
     char id[20]; snprintf(id,sizeof(id),"dose-%d",i+1);
     int slot=scheduleStageSlot(i+1,true,"test-med","Test",1);
+    if (i==0) scheduleStageSlotPillHole(slot, slot1PillHole);
     scheduleStageDose(slot,id,"Morning",600,false);
   }
   scheduleCommitSync();
@@ -192,6 +196,16 @@ int main() {
     release(DISPENSE_BUTTON_PIN);
   }
 
+  // The physical yellow and red buttons, through the real button driver and appLoop (not just
+  // snoozeRound/skipRound): a short press during the alert snoozes / skips the whole round.
+  resetCase(); press(SNOOZE_BUTTON_PIN); release(SNOOZE_BUTTON_PIN);
+  for (int i=0;i<3;++i) assert(dose(i).state==DoseState::Snoozed);
+  assert(pulses.empty() && reservations==0);
+  resetCase(); press(CANCEL_BUTTON_PIN); release(CANCEL_BUTTON_PIN);
+  for (int i=0;i<3;++i) assert(dose(i).state==DoseState::Skipped);
+  assert(pulses.empty() && reservations==0 && savedEvents.size()==3);
+  for (const auto &e:savedEvents) assert(strcmp(e.status,"SKIPPED")==0);
+
   // One physical short press accepts all three; reservations precede motion.
   resetCase(); press(DISPENSE_BUTTON_PIN); release(DISPENSE_BUTTON_PIN);
   if (!ENABLE_SERVO_MOVEMENT) {
@@ -211,11 +225,13 @@ int main() {
   assert(pulseCount(2)==1 && networkCalls==beforeNetwork);
   drop(1);
   tick(MOVE_TIME_MS);
+  if (ENABLE_PILL_SENSOR) tick(PILL_SETTLE_MS);  // plate 1 waits for late pills before freeing its slot
   assert(pendingDoseCount==0 && dose(2).state==DoseState::Dispensing);
   assert(dispenserIsBusy() && savedEvents.empty() && deferredEventCount==1);
   tick(DISPENSE_STAGGER_MS);
   assert(pulseCount(3)==1);
   drop(2); drop(3); tick(MOVE_TIME_MS);
+  if (ENABLE_PILL_SENSOR) tick(PILL_SETTLE_MS);
   assert(!dispenserIsBusy() && savedEvents.size()==3 && deferredEventCount==0);
   for (const auto &e:savedEvents) assert(strcmp(e.status,"DISPENSED")==0);
   for (int i=0;i<3;++i) assert(dose(i).state==DoseState::Done);
@@ -251,6 +267,18 @@ int main() {
   assert(!snoozeRound());
   for (int i=0;i<3;++i) assert(dose(i).state==DoseState::Alerting);
   assert(skipRound()==3 && savedEvents.size()==3);
+
+  // Pill size 15 mm on the web: the very first servo move must be the <=15 mm hole, not the
+  // smallest one. (It once went to the smallest hole first because the hole table was mirrored.)
+  if (ENABLE_SERVO_MOVEMENT) {
+    slot1PillHole=pillHoleFromMillimetres(15);
+    resetCase(); acceptRound();
+    int first=-1;
+    for (const auto &p:pulses) if (p.pin==SERVO_PINS[0] && p.value!=REST_PULSE_US[0]) { first=p.value; break; }
+    assert(slot1PillHole==2 && first==HOLE_PULSE_US[0][2]);
+    levels[CANCEL_BUTTON_PIN]=LOW; tick(); levels[CANCEL_BUTTON_PIN]=HIGH;
+    slot1PillHole=PILL_HOLE_ANY;
+  }
 
   // Refused before any motion (plate 1 beam blocked at start): no pill can have come out, so
   // the day lock is released and the dose can be accepted again once fixed. Before this fix

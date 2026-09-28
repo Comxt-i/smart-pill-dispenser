@@ -42,7 +42,7 @@ constexpr uint8_t VIB_SPEED = 70;
 bool vibrating = false;
 
 // ตัวกรองเดียวกับเฟิร์มแวร์จริง: บังรวมต่ำกว่านี้ = สัญญาณรบกวน
-constexpr uint32_t PILL_MIN_BLOCK_US = 500;
+constexpr uint32_t PILL_MIN_BLOCK_US = 150;  // ตรงกับ config.h
 
 // ---- สถานะ ----
 bool laserOn = false;

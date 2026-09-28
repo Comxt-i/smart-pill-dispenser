@@ -17,6 +17,7 @@ extern unsigned long fakeExtraUs;
 inline unsigned long millis() { return fakeMillis; }
 inline unsigned long micros() { return fakeMillis * 1000UL + fakeExtraUs; }
 inline void delay(unsigned long ms) { fakeMillis += ms; }
+inline void delayMicroseconds(unsigned int us) { fakeExtraUs += us; }
 
 #define IRAM_ATTR
 constexpr int CHANGE = 3;

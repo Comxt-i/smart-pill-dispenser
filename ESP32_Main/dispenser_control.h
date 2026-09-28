@@ -5,7 +5,10 @@
 
 // SensorBlocked = ตัวรับไม่เห็นแสงเลเซอร์ (มีของขวาง เล็งไม่ตรง หรือตัวรับไม่มีไฟ แยกกันไม่ได้ทางไฟฟ้า)
 // LaserOff      = สั่งเปิดเลเซอร์ไม่ได้ (PCF8574 ไม่ตอบทางบัส I2C)
-enum class DispenseResult { Started, Invalid, Disabled, Busy, Cancelled, ServoError, SensorBlocked, LaserOff };
+// SensorUnstable = ตัวรับเห็นแสงบ้างไม่เห็นบ้าง (จุดแสงค่อนขอบตัวรับ ยึดไม่แน่น) นับเม็ดไม่ได้
+enum class DispenseResult {
+  Started, Invalid, Disabled, Busy, Cancelled, ServoError, SensorBlocked, LaserOff, SensorUnstable
+};
 
 /**
  * ผลของการจ่ายยาหนึ่งครั้งที่ "จบแล้ว" ไม่ว่าจะจบครบหรือถูกยกเลิกกลางคัน
@@ -37,6 +40,10 @@ struct DispenseOutcome {
   // ใช้แยก "เซ็นเซอร์เห็นเม็ดเล็กแต่สั้นเกินเกณฑ์" ออกจาก "เซ็นเซอร์ไม่เห็นอะไรเลย"
   uint8_t uncountedBlocks;
   uint32_t longestUncountedUs;
+  // เม็ดที่บังลำแสงสั้นที่สุดในบรรดาที่นับได้ (0 = ไม่ได้นับเลย) ถ้าใกล้ PILL_MIN_BLOCK_US = เกณฑ์เสี่ยงนับขาด
+  uint32_t shortestCountedUs;
+  // นานที่สุด ถ้ายาวกว่าสั้นสุดหลายเท่า = ยาตกติดกันเป็นก้อน (นับเป็นเม็ดเดียว เสี่ยงให้ยาเกิน)
+  uint32_t longestCountedUs;
 };
 
 /**
@@ -106,5 +113,18 @@ bool pillSensorBlocked(uint8_t dispenser);
 void dispenserSensorSelfTest();
 /** PCF8574 ที่คุม relay เลเซอร์ตอบครั้งล่าสุดที่สั่งไหม (ไม่ใช้สวิตช์เลเซอร์ = true) */
 bool laserSwitchResponding();
-/** ตัวรับของจานนั้น: 1 = ใช้ได้, 0 = ไม่เห็นแสงเลเซอร์, -1 = ยังไม่ได้ตรวจหรือปิดเซ็นเซอร์ */
+/** ตัวรับของจานนั้น: 1 = ใช้ได้, 0 = ไม่เห็นแสงเลเซอร์, 2 = แสงไม่นิ่ง (กะพริบ), -1 = ยังไม่ได้ตรวจหรือปิดเซ็นเซอร์ */
 int8_t pillSensorStatus(uint8_t dispenser);
+/**
+ * ผลนับจากการตรวจตัวรับครั้งล่าสุด: อ่านได้ HIGH กี่ครั้งจาก LASER_CHECK_SAMPLES ตอนเลเซอร์ดับและตอนติด
+ * ส่งขึ้นเว็บให้ไล่ปัญหาจากมือถือได้ (ต่อคอมดู Serial พร้อม adapter ไม่ได้) คืน false ถ้ายังไม่ได้ตรวจ
+ */
+bool pillSensorReads(uint8_t dispenser, uint8_t &darkHigh, uint8_t &litHigh);
+/**
+ * จานที่ตรวจไม่ผ่านเสียแบบไหน สั้นพอขึ้นจอ (ภาษาอังกฤษ) nullptr = ผ่านหรือยังไม่ได้ตรวจ
+ *   "LIGHT W/O LASER"  ตัวรับเห็นแสงทั้งที่เลเซอร์ดับ: แสงรอบข้างส่องเข้าตัวรับ
+ *                      หรือเลเซอร์จานนั้นต่อไฟตรง ไม่ผ่าน NO ของ relay (ติดตลอด)
+ *   "NEVER SEES LASER" ตัวรับไม่เห็นแสงเลเซอร์เลย: เล็งไม่โดน เลเซอร์ไม่ติด หรือตัวรับไม่มีไฟ
+ *   "BEAM FLICKERS"    แสงไม่นิ่ง: จุดแสงค่อนขอบตัวรับ หรือยึดไม่แน่น
+ */
+const char *pillSensorFaultHint(uint8_t dispenser);

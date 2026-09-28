@@ -36,7 +36,7 @@ const uint8_t SENSOR_MASK = 0b00000111;  // บิต 0-2 ของ PORTB
 const uint8_t LED_PINS[3] = {5, 6, 7};  // แดง เหลือง เขียว (HIGH = ติด)
 
 // ตัวกรองเดียวกับเฟิร์มแวร์จริง: บังรวมต่ำกว่านี้ = สัญญาณรบกวน
-const unsigned long PILL_MIN_BLOCK_US = 500;
+const unsigned long PILL_MIN_BLOCK_US = 150;  // ตรงกับ config.h
 
 bool laserOn = false;
 int blockedLevel = -1;  // ระดับที่แปลว่า "ถูกบัง" หาได้จากคำสั่ง p
@@ -229,7 +229,7 @@ void startWatch()
   delay(LASER_SETTLE_MS);
   clearQueues();
   watching = true;
-  Serial.println(F("โหมดดูเม็ดยา: หยอดเม็ดยาผ่านลำแสง (นับเมื่อบัง >= 500 us) พิมพ์ w เพื่อหยุด"));
+  Serial.println(F("โหมดดูเม็ดยา: หยอดเม็ดยาผ่านลำแสง (นับเมื่อบัง >= 150 us) พิมพ์ w เพื่อหยุด"));
 }
 
 void stopWatch()
