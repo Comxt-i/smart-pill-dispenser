@@ -25,6 +25,8 @@ struct Dose {
   bool failureReported;  // กันส่ง FAILED ซ้ำเมื่อผู้ใช้กดจ่ายแล้วพลาดหลายครั้ง
   int snoozedUntil;      // นาทีของวันที่จะกลับมาเตือนอีกครั้ง (-1 = ไม่ได้เลื่อน)
   uint8_t snoozeCount;   // เลื่อนไปแล้วกี่ครั้งในมื้อนี้
+  // เวลาที่ผู้ใช้กดรับ (0 = ยังไม่ได้กด) บันทึก DISPENSED ใช้เวลานี้ ไม่ใช่ตอนจ่ายเสร็จ
+  uint32_t acceptedEpoch;
 };
 
 struct Slot {

@@ -111,6 +111,7 @@ extern EspClass ESP;
 void analogWrite(uint8_t pin, int value);
 bool ledcAttachChannel(uint8_t pin, uint32_t freq, uint8_t resolution, uint8_t channel);
 bool ledcWrite(uint8_t pin, uint32_t duty);
+uint32_t ledcChangeFrequency(uint8_t pin, uint32_t freq, uint8_t resolution);
 long map(long x, long inMin, long inMax, long outMin, long outMax);
 
 // ของจริงเป็นมาโคร แต่เทมเพลตพอสำหรับตรวจไวยากรณ์และปลอดภัยกว่า

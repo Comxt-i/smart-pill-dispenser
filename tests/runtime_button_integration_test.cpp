@@ -27,7 +27,6 @@ void stopDispenser() { ++stopCalls; busy = false; }
 // 42 เป็นค่าที่เป็นไปไม่ได้ ใช้จับกรณีที่ช่องตามขนาดยาไม่ถูกส่งต่อมาเลย
 int8_t lastRequestedHole = 42;
 DispenseResult dispenseMedicine(uint8_t, uint8_t pills, int8_t hole) { ++dispenseCalls; lastRequestedHole = hole; if (!pills) return DispenseResult::Invalid; busy = simulatedResult == DispenseResult::Started; return simulatedResult; }
-int8_t scheduleSlotPillHole(uint8_t) { return 2; }
 Dose* scheduleDoseAt(const DoseRef&) { return &testDose; }
 const Slot* scheduleSlotOf(const DoseRef&) { return &testSlot; }
 int scheduleFindSlot(uint8_t) { return 0; }
@@ -145,7 +144,13 @@ int doseEffectiveMinutes(const Dose&) { return 0; }
 bool netSyncDue() { return true; }
 bool netSyncFetch() { ++networkCalls; return true; }
 bool netSyncFlushEvents() { ++networkCalls; return true; }
-bool netSyncTakeCommand(RemoteCommand&) { return false; }
+// คำสั่งที่ server ฝากไว้ให้กล่องรับรอบถัดไป (ไม่มี = คืน false)
+RemoteCommand waitingCommand = {};
+bool commandWaiting = false;
+bool netSyncTakeCommand(RemoteCommand &out) {
+  if (!commandWaiting) return false;
+  out = waitingCommand; commandWaiting = false; return true;
+}
 uint8_t eventQueueSize() { return 1; }
 const char *wifiSetupSsid() { return "test"; }
 const char *wifiSetupPassword() { return "test-only"; }
@@ -222,16 +227,33 @@ int main() {
   assert(stopCalls == 1);
   tick(3000); release(ButtonId::Dispense);
   assert(setupCalls == 0 && dispenseCalls == 0);
-  // The real application reports explicit simulation markers for button and web commands.
+  // The real application reports explicit simulation markers for the button.
   resetCase(); simulatedResult=DispenseResult::Disabled;
   queuedEvents=0;
   press(ButtonId::Dispense); release(ButtonId::Dispense);
   assert(queuedEvents == 1 && strcmp(lastEvent.status, "DISPENSED") == 0);
   assert(strstr(lastEvent.note, "dry run") != nullptr);
-  RemoteCommand command = {}; strcpy(command.id, "test-command"); command.slot=1; command.amount=2;
-  startCommandDispense(command);
-  assert(queuedEvents == 2 && strcmp(lastEvent.commandId, "test-command") == 0);
-  assert(strcmp(lastEvent.status, "DISPENSED") == 0 && strstr(lastEvent.note, "dry run"));
+  simulatedResult = DispenseResult::Started;
+
+  // Dispensing from the web is gone: pills come out only when someone at the box presses green.
+  // A DISPENSE command still waiting on an old server is closed with ACK (no intake history)
+  // and never moves the mechanism, even with the box idle and nothing blocking commands.
+  resetCase(); testDose.state = DoseState::Done; queuedEvents = 0;
+  waitingCommand = {}; strcpy(waitingCommand.id, "web-dispense"); strcpy(waitingCommand.type, "DISPENSE");
+  waitingCommand.slot = 1; waitingCommand.amount = 2; commandWaiting = true;
+  appLoop();
+  assert(!commandWaiting);  // the command really was taken and handled, not just left waiting
+  assert(dispenseCalls == 0 && !busy);
+  assert(queuedEvents == 1 && strcmp(lastEvent.commandId, "web-dispense") == 0);
+  assert(strcmp(lastEvent.status, "ACK") == 0 && strstr(lastEvent.note, "disabled"));
+  // Other web commands still work (control: the command path itself is alive).
+  resetCase(); testDose.state = DoseState::Done; queuedEvents = 0;
+  waitingCommand = {}; strcpy(waitingCommand.id, "web-buzz"); strcpy(waitingCommand.type, "BUZZ");
+  commandWaiting = true;
+  appLoop();
+  assert(queuedEvents == 1 && strcmp(lastEvent.commandId, "web-buzz") == 0 && strstr(lastEvent.note, "buzz"));
+  assert(strcmp(lastEvent.status, "ACK") == 0 && dispenseCalls == 0);
+
   PendingEvent skipped = {}; strcpy(skipped.status, "SKIPPED"); strcpy(skipped.note, "cancelled by user");
   queueEvent(skipped);
   assert(strstr(lastEvent.note, "dry run") && strstr(lastEvent.note, "cancelled by user"));
@@ -250,10 +272,11 @@ int main() {
   networkCalls = 0;
   appLoop(); // This release starts motion before the HTTP sync phase.
   assert(busy && networkCalls == 1); // Only pre-gesture local web handling, no HTTP sync.
-  resetCase(); runOwner[0] = RunOwner::Command;
-  suppliedOutcome = {1, 1, 2, 1, false, true, StopReason::Done, 0, 0, 0, 0}; outcomeReady = true;
+  // A finished run nobody owns has no dose to record against: report nothing.
+  resetCase(); runOwner[0] = RunOwner::None; queuedEvents = 0;
+  suppliedOutcome = {1, 1, 1, 1, false, true, StopReason::Done, 0, 0, 0, 0}; outcomeReady = true;
   handleDispenseOutcome();
-  assert(strcmp(lastEvent.status, "FAILED") == 0 && strstr(lastEvent.note, "2/1"));
+  assert(!outcomeReady && queuedEvents == 0);
   resetCase(); runOwner[0] = RunOwner::Dose;
   testDose.failureReported = false;
   suppliedOutcome = {1, 2, 1, 1, false, true, StopReason::Done, 0, 0, 0, 0}; outcomeReady = true;

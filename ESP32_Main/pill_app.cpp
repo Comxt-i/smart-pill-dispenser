@@ -22,14 +22,18 @@
 
 namespace {
 
-/** เจ้าของรอบการจ่ายที่กำลังทำงานอยู่ ใช้ตัดสินว่าผลที่ได้ต้องรายงานแบบไหน */
-enum class RunOwner : uint8_t { None, Dose, Command };
+/**
+ * เจ้าของรอบการจ่ายที่กำลังทำงานอยู่ ใช้ตัดสินว่าผลที่ได้ต้องรายงานแบบไหน
+ *
+ * ยาออกจากกล่องได้ทางเดียวคือผู้ใช้กดปุ่มเขียวรับมื้อที่ถึงเวลา (Dose)
+ * เลิกให้เว็บสั่งจ่ายแล้ว: คนที่ไม่ได้อยู่หน้ากล่องสั่งยาออกมาวางทิ้งไว้ได้ โดยไม่มีใครรับจริง
+ */
+enum class RunOwner : uint8_t { None, Dose };
 
 DoseRef activeAlert = {0, 0, false};
 
 // สถานะแยกรายจาน เพราะจ่ายพร้อมกันได้ถึง MAX_CONCURRENT_DISPENSERS จาน
 RunOwner runOwner[DISPENSER_COUNT] = {};
-RemoteCommand runningCommand[DISPENSER_COUNT];
 
 // อ้างอิงมื้อยาที่กำลังจ่ายด้วย schedule_id ไม่ใช่ index เพราะอาจมี sync คั่นระหว่างที่จานหมุน
 // แล้วทำให้ลำดับของมื้อยาเปลี่ยนไป
@@ -111,6 +115,11 @@ void reportDose(const DoseRef &ref, const char *status, const char *note)
   fillEvent(event, status);
   strncpy(event.scheduleId, dose->scheduleId, sizeof(event.scheduleId) - 1);
   strncpy(event.medicationId, slot->medicationId, sizeof(event.medicationId) - 1);
+
+  // จ่ายสำเร็จ: เวลาในบันทึกคือตอนผู้ใช้กดรับ ไม่ใช่ตอนจ่ายเสร็จ
+  // มื้อที่มียาหลายจาน จานท้ายๆ รอคิวจนเสร็จช้ากว่าตอนกดได้เป็นนาที กดทันเวลาแต่ server จะตัดสินว่า "กินช้า"
+  if (dose->acceptedEpoch != 0 && strcmp(status, "DISPENSED") == 0)
+    event.localEpoch = dose->acceptedEpoch;
 
   // แนบจำนวนครั้งที่ผู้ใช้กดเลื่อนไปกับผลสุดท้าย เพื่อให้ผู้ดูแลเห็นว่ามื้อนี้ถูกผัดไปกี่รอบ
   // โดยไม่ต้องสร้างประวัติแยกสำหรับการเลื่อนแต่ละครั้ง
@@ -454,11 +463,13 @@ void acceptRound()
   pendingDoseCount = 0;
   char detail[2][LCD_MAX_COLS + 1] = {};
   uint8_t details = 0;
+  const uint32_t acceptedAt = rtcLocalEpoch();  // ทุกมื้อในรอบถูกรับพร้อมกันด้วยการกดครั้งเดียว
   for (uint8_t i = 0; i < count; ++i)
   {
     Dose *dose = scheduleDoseAt(alerting[i]);
     const Slot *slot = scheduleSlotOf(alerting[i]);
     if (!dose || !slot) continue;
+    dose->acceptedEpoch = acceptedAt;
     if (!pillsFor(slot->amountPerDose)) {
       dose->state = DoseState::Failed;
       reportDose(alerting[i], "FAILED", "invalid parameters");
@@ -535,34 +546,6 @@ uint8_t skipRound()
 
   pendingDoseCount = 0;
   return count;
-}
-
-void startCommandDispense(const RemoteCommand &command)
-{
-  char detail[LCD_MAX_COLS + 1];
-  snprintf(detail, sizeof(detail), "SLOT %u x%u (WEB)", static_cast<unsigned>(command.slot),
-           static_cast<unsigned>(pillsFor(command.amount)));
-  showDispensingScreen(detail, "");
-  const DispenseResult result =
-      dispenseMedicine(command.slot, pillsFor(command.amount), scheduleSlotPillHole(command.slot));
-  if (result == DispenseResult::Disabled && DISPENSE_DRY_RUN) {
-    alertOneShot(AlertPattern::Success);
-    showNotice("DRY RUN OK");
-    reportCommand(command, "DISPENSED", "dry run");
-    return;
-  }
-  if (result != DispenseResult::Started)
-  {
-    Serial.printf("[คำสั่ง] ช่อง %u ไม่สำเร็จ: %s\n", command.slot, describe(result));
-    alertOneShot(AlertPattern::Warning);
-    reportCommand(command, "FAILED", reasonCode(result));
-    return;
-  }
-
-  const uint8_t index = static_cast<uint8_t>(command.slot - 1);
-  runningCommand[index] = command;
-  runOwner[index] = RunOwner::Command;
-  // No I2C operations while a motor is active.
 }
 
 /**
@@ -663,14 +646,7 @@ void handleDispenseOutcome()
     }
     return;
   }
-
-  if (owner == RunOwner::Command)
-  {
-    alertOneShot(complete ? AlertPattern::Success : AlertPattern::Warning);
-    reportCommand(runningCommand[index],
-                  complete ? "DISPENSED" : "FAILED",
-                  complete ? successNote : failureNote);
-  }
+  // ไม่มีเจ้าของ (เช่นรอบที่ถูกหยุดหลังล้างสถานะ) ไม่มีมื้อให้บันทึกผล
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,7 +1002,8 @@ void updateDisplay()
              slot ? slot->number : 0);
     snprintf(hintB, sizeof(hintB), "GREEN = TAKE NOW");
 
-    if (scheduleSnoozeCount(activeAlert) >= MAX_SNOOZE_PER_DOSE)
+    // เลื่อนครบโควตา หรือใกล้หมดเวลาผ่อนผันจนเลื่อนไม่ได้แล้ว: ไม่บอกให้กดเหลือง
+    if (!scheduleCanSnooze(activeAlert, rtcMinutesOfDay()))
       snprintf(hintC, sizeof(hintC), "RED = SKIP DOSE");
     else
       snprintf(hintC, sizeof(hintC), "YEL +%dmin  RED skip", SNOOZE_MINUTES);
@@ -1307,7 +1284,7 @@ void appLoop()
   // ทุกอย่างในนี้ไม่ block แล้ว: การรับส่งจริงอยู่ใน task เบื้องหลัง ตรงนี้แค่ส่งงานกับรับผล
   // จึงไม่ต้องรอให้ปล่อยปุ่มเขียวก่อน (เดิมรอ) ถ้าปุ่มค้างหรือสายหลวมจนอ่านว่ากดอยู่ตลอด
   // เครื่องจะไม่คุยกับ server อีกเลย: ต่อ Wi-Fi ได้แต่เว็บเห็น OFFLINE และตารางไม่อัปเดต
-  // ส่วนที่ขยับกลไก (คำสั่งจากเว็บด้านล่าง) ยังรอให้ปล่อยปุ่มเหมือนเดิม
+  // คำสั่งจากเว็บด้านล่าง (เรียกกล่อง/หยุด) ยังรอให้ปล่อยปุ่มเหมือนเดิม
   {
     netSyncService();  // ผลที่เสร็จแล้ว (ตารางใหม่ เวลา คำสั่ง) นำไปใช้ตรงนี้
 
@@ -1338,7 +1315,11 @@ void appLoop()
     {
       if (strcmp(command.type, "DISPENSE") == 0)
       {
-        startCommandDispense(command);
+        // เลิกให้เว็บสั่งจ่ายแล้ว (server ไม่ส่งคำสั่งนี้แล้ว กันไว้เผื่อ server รุ่นเก่าหรือคำสั่งค้าง)
+        // ตอบ ACK = ปิดคำสั่งโดยไม่สร้างประวัติการจ่ายยา ไม่อย่างนั้นค้างวนส่งซ้ำจนหมดอายุ
+        Serial.printf("[คำสั่ง] ปฏิเสธคำสั่งจ่ายยาจากเว็บ ช่อง %u: จ่ายได้จากปุ่มเขียวที่กล่องเท่านั้น\n",
+                      static_cast<unsigned>(command.slot));
+        reportCommand(command, "ACK", "web dispense disabled");
       }
       else if (strcmp(command.type, "BUZZ") == 0)
       {
@@ -1367,42 +1348,6 @@ void appLoop()
   updateStatusLed();
   updateDisplay();
   lcdMedicineTick();  // ขยับข้อความเลื่อนและสลับบรรทัดล่าง
-}
-
-const char *appManualDispense(uint8_t slotNumber, float amount, int &httpStatus)
-{
-  const int slotIndex = scheduleFindSlot(slotNumber);
-  if (slotIndex < 0)
-  {
-    httpStatus = 404;
-    return "ไม่พบช่องนี้ในตารางที่ sync มาจาก server";
-  }
-
-  const Slot &slot = scheduleSlot(slotIndex);
-  if (slot.medicationId[0] == '\0')
-  {
-    httpStatus = 409;
-    return "ช่องนี้ยังไม่ได้ใส่ยาในระบบ";
-  }
-
-  const float requested = amount > 0 ? amount : slot.amountPerDose;
-  const DispenseResult result = dispenseMedicine(slotNumber, pillsFor(requested), slot.pillHole);
-  if (result != DispenseResult::Started)
-  {
-    httpStatus = result == DispenseResult::Busy || result == DispenseResult::Cancelled ? 409 : 503;
-    return describe(result);
-  }
-
-  // ใช้เส้นทางเดียวกับคำสั่งจากเว็บ เพื่อให้ผลถูกบันทึกขึ้น server เหมือนกัน
-  const uint8_t index = static_cast<uint8_t>(slotNumber - 1);
-  memset(&runningCommand[index], 0, sizeof(runningCommand[0]));
-  strncpy(runningCommand[index].type, "DISPENSE", sizeof(runningCommand[0].type) - 1);
-  runningCommand[index].slot = slotNumber;
-  runningCommand[index].amount = requested;
-  runOwner[index] = RunOwner::Command;
-
-  httpStatus = 202;
-  return "เริ่มจ่ายยาแล้ว (ยังไม่ได้ยืนยันจำนวนเม็ดด้วย IR)";
 }
 
 void appStatusJson(String &out)

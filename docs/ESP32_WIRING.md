@@ -9,7 +9,7 @@
 | GPIO18 | สายสัญญาณ Servo จาน 1 |
 | GPIO19 | สายสัญญาณ Servo จาน 2 |
 | GPIO23 | สายสัญญาณ Servo จาน 3 |
-| GPIO15 | IN ของวงจรขับ/โมดูล Active buzzer ที่รองรับสัญญาณ 3.3V และ active HIGH |
+| GPIO15 | IN ของโมดูล Passive buzzer (ขับด้วยคลื่น 2 kHz จาก PWM ช่อง 7) |
 | GPIO13 / GPIO16 | DRV8833 ช่อง 1: IN1 (PWM) / IN2 (DIR) ของมอเตอร์สั่น |
 | GPIO26 / GPIO17 | DRV8833 ช่อง 2: IN1 (PWM) / IN2 (DIR) ของมอเตอร์สั่น |
 | GPIO4 / GPIO14 | DRV8833 ช่อง 3: IN1 (PWM) / IN2 (DIR) ของมอเตอร์สั่น |
@@ -40,7 +40,10 @@ GPIO14 อาจมีสัญญาณระหว่างบูต เฟิ
 
 ## ส่วนที่ต้องยืนยันกับอุปกรณ์จริง
 
-ภาพ Buzzer เป็นตัวอย่างโมดูล Active buzzer พร้อมวงจรขับ ใช้ไฟ 5V และรับ IN 3.3V แบบ active HIGH ต้องตรวจสเปกโมดูลก่อนเลือกใช้ โค้ดใช้ `digitalWrite()` เปิด/ปิด ไม่ได้สร้างเสียงความถี่สำหรับ passive buzzer และ `BUZZER_ACTIVE_HIGH` ใช้เลือกขั้วลอจิก
+Buzzer ที่ใช้จริงเป็น **passive** (ทดสอบกับ Uno แล้ว: `digitalWrite` HIGH/LOW เงียบ ดังเฉพาะตอน `tone()`)
+โค้ดจึงสร้างคลื่นความถี่ `BUZZER_TONE_HZ` (2 kHz) ด้วย PWM บนช่อง LEDC ที่จองไว้ (`BUZZER_LEDC_CHANNEL` = 7)
+ไม่ใช้ `tone()` เพราะเลือกช่องเองแล้วอาจแย่งช่องของ servo ถ้าเปลี่ยนเป็น active buzzer ให้ตั้ง `BUZZER_PASSIVE = false`
+ส่วน `BUZZER_ACTIVE_HIGH` เลือกระดับของขา IN ตอนเงียบ (true = ค้าง LOW)
 
 firmware มีโค้ดอ่านเซ็นเซอร์ดิจิทัลแบบ active-low ที่ GPIO34/35/36 แต่การทำงานร่วมกับชุด **Laser Head Transmitter & Receiver Module KY-008** ยังไม่ผ่านการยืนยันกับอุปกรณ์จริง ขาเหล่านี้เป็นเพียงข้อเสนอสำหรับสัญญาณจากตัวรับแสง ไม่ใช่ขาควบคุมตัวส่งเลเซอร์ ต้องตรวจผังขา แรงดันและชนิดเอาต์พุตก่อนต่อ และ GPIO เหล่านี้ไม่มี pull-up/pull-down ภายใน
 

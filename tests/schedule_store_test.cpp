@@ -114,13 +114,14 @@ void testAlertAndMissed()
   assert(stateOf("sch-morning") == DoseState::Alerting);
   assert(countTo(DoseState::Alerting) == 1);
 
-  // ยังอยู่ในเวลาผ่อนผัน: เตือนต่อโดยไม่แจ้งสถานะซ้ำ
-  alerting = scheduleTick(8 * 60 + ALERT_TIMEOUT_MINUTES, DAY_ONE, false);
+  // นาทีสุดท้ายของเวลาผ่อนผัน: เตือนต่อโดยไม่แจ้งสถานะซ้ำ
+  alerting = scheduleTick(8 * 60 + ALERT_TIMEOUT_MINUTES - 1, DAY_ONE, false);
   assert(alerting.valid);
   assert(countTo(DoseState::Alerting) == 1);
 
-  // เลยเวลาผ่อนผัน: กลายเป็นขาดยา และต้องแจ้งเพียงครั้งเดียว
-  alerting = scheduleTick(8 * 60 + ALERT_TIMEOUT_MINUTES + 1, DAY_ONE, false);
+  // ครบเวลาผ่อนผันพอดี (08:30:00): ขาดยาทันที ตรงกับที่ server ตัด และต้องแจ้งเพียงครั้งเดียว
+  // เดิมรอถึงนาทีถัดไป ช่วง 08:30:00-08:30:59 เว็บขึ้นขาดยาแต่กล่องยังเตือนให้กดรับ
+  alerting = scheduleTick(8 * 60 + ALERT_TIMEOUT_MINUTES, DAY_ONE, false);
   assert(!alerting.valid);
   assert(stateOf("sch-morning") == DoseState::Missed);
   assert(countTo(DoseState::Missed) == 1);
@@ -167,9 +168,15 @@ void testRecentDoseAfterBootStillAlerts()
   stageStandardSchedule();
 
   // เปิดเครื่องหลังเวลามื้อยาไม่นาน ยังอยู่ในวิสัยที่ให้ผู้ใช้กดรับยาได้
-  const DoseRef alerting = scheduleTick(8 * 60 + STALE_DOSE_MINUTES, DAY_ONE, true);
+  const DoseRef alerting = scheduleTick(8 * 60 + STALE_DOSE_MINUTES - 1, DAY_ONE, true);
   assert(alerting.valid);
   assert(stateOf("sch-morning") == DoseState::Alerting);
+
+  // เปิดเครื่องตอนครบเวลาผ่อนผันพอดี: หมดเวลาแล้ว ไม่เตือนแวบเดียวแล้วรายงานขาดยา
+  resetStore();
+  stageStandardSchedule();
+  assert(!scheduleTick(8 * 60 + STALE_DOSE_MINUTES, DAY_ONE, true).valid);
+  assert(stateOf("sch-morning") == DoseState::Missed && transitions.empty());
 }
 
 void testSyncPreservesProgress()
@@ -360,13 +367,31 @@ void testSnoozeCannotCrossGracePeriod()
   resetStore();
   stageStandardSchedule();
 
-  // เข้าใกล้เส้นตายมากจนเลื่อนไปก็จะตื่นหลังหมดเวลาผ่อนผัน
-  const int nearDeadline = 8 * 60 + ALERT_TIMEOUT_MINUTES - (SNOOZE_MINUTES - 1);
-  scheduleTick(nearDeadline, DAY_ONE, false);
+  // เลื่อนครั้งสุดท้ายที่ยอมได้: กลับมาเตือนแล้วยังเหลือเวลากดรับ SNOOZE_MIN_RESPONSE_MINUTES
+  // มื้อ 08:00 เลื่อนตอน 08:20 กลับมาเตือน 08:25 เหลือเวลาถึง 08:30 อีก 5 นาที
+  const int deadline = 8 * 60 + ALERT_TIMEOUT_MINUTES;
+  const int lastAllowed = deadline - SNOOZE_MINUTES - SNOOZE_MIN_RESPONSE_MINUTES;
+  scheduleTick(lastAllowed, DAY_ONE, false);
+  assert(stateOf("sch-morning") == DoseState::Alerting);
+  DoseRef ref = scheduleFindByScheduleId("sch-morning");
+  assert(scheduleCanSnooze(ref, lastAllowed));
+
+  // หนึ่งนาทีหลังจากนั้นเลื่อนไม่ได้แล้ว (เดิมยอม: เลื่อน 08:24 กลับมา 08:29 เหลือเวลาตอบนาทีเดียว)
+  // ถูกปฏิเสธแล้วต้องยังเตือนอยู่ ไม่หายเงียบ
+  scheduleTick(lastAllowed + 1, DAY_ONE, false);
+  assert(!scheduleCanSnooze(ref, lastAllowed + 1));
+  assert(!scheduleSnooze(ref, lastAllowed + 1));
   assert(stateOf("sch-morning") == DoseState::Alerting);
 
-  const DoseRef ref = scheduleFindByScheduleId("sch-morning");
-  assert(!scheduleSnooze(ref, nearDeadline));
+  // เลื่อนที่นาทีสุดท้ายที่ยอม: ตื่นกลับมาเตือนก่อนหมดเวลา และยังกดรับได้อีกหลายนาที
+  resetStore();
+  stageStandardSchedule();
+  scheduleTick(lastAllowed, DAY_ONE, false);
+  ref = scheduleFindByScheduleId("sch-morning");
+  assert(scheduleSnooze(ref, lastAllowed));
+  scheduleTick(lastAllowed + SNOOZE_MINUTES, DAY_ONE, false);
+  assert(stateOf("sch-morning") == DoseState::Alerting);
+  scheduleTick(deadline - 1, DAY_ONE, false);
   assert(stateOf("sch-morning") == DoseState::Alerting);
 }
 
@@ -382,9 +407,28 @@ void testSnoozedDoseStillBecomesMissed()
 
   // ถ้าเครื่องดับหรือผู้ใช้หายไปจนเลยเวลาผ่อนผัน มื้อที่เลื่อนไว้ต้องกลายเป็นขาดยา
   // ไม่ใช่ค้างอยู่ในสถานะเลื่อนตลอดไป
-  scheduleTick(8 * 60 + ALERT_TIMEOUT_MINUTES + 1, DAY_ONE, false);
+  scheduleTick(8 * 60 + ALERT_TIMEOUT_MINUTES, DAY_ONE, false);
   assert(stateOf("sch-morning") == DoseState::Missed);
   assert(countTo(DoseState::Missed) == 1);
+}
+
+void testAcceptedTimeFollowsDose()
+{
+  resetStore();
+  stageStandardSchedule();
+  scheduleTick(8 * 60, DAY_ONE, false);
+  Dose *dose = scheduleDoseAt(scheduleFindByScheduleId("sch-morning"));
+  assert(dose->acceptedEpoch == 0);  // มื้อใหม่ยังไม่มีใครกดรับ
+  dose->acceptedEpoch = 1800000000;
+  dose->state = DoseState::Dispensing;
+
+  // sync ระหว่างจ่าย: เวลาที่กดรับต้องไม่หาย ไม่อย่างนั้นบันทึกจะกลับไปใช้เวลาจ่ายเสร็จ
+  stageStandardSchedule();
+  assert(scheduleDoseAt(scheduleFindByScheduleId("sch-morning"))->acceptedEpoch == 1800000000);
+
+  // วันใหม่: เวลาของเมื่อวานต้องไม่ติดไปกับมื้อของวันนี้
+  scheduleTick(8 * 60, DAY_TWO, false);
+  assert(scheduleDoseAt(scheduleFindByScheduleId("sch-morning"))->acceptedEpoch == 0);
 }
 
 void testSnoozeSurvivesSync()
@@ -542,6 +586,7 @@ int main()
   testSnoozeCannotCrossGracePeriod();
   testSnoozedDoseStillBecomesMissed();
   testSnoozeSurvivesSync();
+  testAcceptedTimeFollowsDose();
   testSnoozeOnlyWhileAlerting();
   testDayRolloverClearsSnooze();
   testEffectiveMinutesFollowsSnooze();

@@ -11,10 +11,12 @@
   | ตั้งตารางยา / จัดยาลงช่อง                  |
   v                                           |
 Backend (NestJS + Prisma)  <--- GET /api/device/sync ------+  ดึงเวลา + ตารางยาของวันนี้ + คำสั่งค้าง
-       ^                   <--- POST /api/device/events ---+  ส่งผลการจ่ายยากลับ
-       |                                                      (กันซ้ำด้วย event_id)
-       +--- POST /api/devices/:id/dispense (สั่งจ่ายทันทีจากเว็บ)
+                           <--- POST /api/device/events ---+  ส่งผลการจ่ายยากลับ
+                                                              (กันซ้ำด้วย event_id)
 ```
+
+ยาออกจากกล่องได้ทางเดียวคือมีคนกดปุ่มเขียวรับมื้อที่ถึงเวลาอยู่หน้ากล่อง เว็บสั่งจ่ายยาไม่ได้
+(เดิมมี `POST /api/devices/:id/dispense` ถูกเอาออกแล้ว ดูหัวข้อ "เลิกสั่งจ่ายยาจากเว็บ")
 
 ESP32 อยู่หลัง NAT และไม่มี public IP ฝั่ง server จึงเปิดการเชื่อมต่อค้างไว้ด้วย long polling แทนการ push ตรงถึงเครื่อง
 เครื่องเรียก `/api/device/wait` เพื่อรับแจ้งการเปลี่ยนแปลง แล้วเรียก sync เต็มตาม `next_poll_sec` (schema 2 ปกติ 300 วินาที; server อาจลดช่วงนี้เมื่อมีคำสั่งค้าง) เป็นกลไกสำรอง
@@ -93,7 +95,7 @@ Query (ไม่บังคับ): `firmware_version`, `ip_address`, `rssi` �
     }
   ],
   "commands": [
-    { "id": "e392e90d-...", "type": "DISPENSE", "slot": 1, "amount": 1, "schedule_id": null }
+    { "id": "e392e90d-...", "type": "BUZZ", "slot": null, "amount": 1, "schedule_id": null }
   ]
 }
 ```
@@ -230,15 +232,17 @@ GET /api/device/wait?state=ab12cd34&timeout_sec=15
 Firmware เก็บ event ที่รอส่งได้สูงสุด 12 รายการใน NVS; เมื่อคิวเต็ม event ใหม่จะแทนที่รายการเก่าสุด
 ระหว่างที่มอเตอร์ยังทำงาน event ที่เพิ่งเกิดอาจพักใน RAM ก่อนเขียน NVS จึงอาจสูญหายหากไฟดับในช่วงนั้น
 
-## POST /api/devices/:id/dispense (เว็บสั่ง)
+## เลิกสั่งจ่ายยาจากเว็บ
 
-```json
-{ "slot_number": 1, "amount": 1, "schedule_id": null, "note": null }
-```
+`POST /api/devices/:id/dispense` ถูกเอาออกแล้ว ยาออกจากกล่องได้เฉพาะตอนมีคนกดปุ่มเขียวอยู่หน้ากล่อง
+(สั่งจากเว็บได้ ยาจะออกมาวางทิ้งไว้ทั้งที่ไม่มีใครอยู่รับ)
 
-สร้าง `DeviceCommand` สถานะ `PENDING`; เครื่องจะได้รับการแจ้งผ่าน `/api/device/wait` แล้วดึงคำสั่งในการ sync รอบถัดไป
-สถานะเดินทาง `PENDING → SENT → DONE/FAILED` โดย `DONE/FAILED` ถูกปิดเมื่อเครื่องส่ง event ที่มี `command_id` กลับมา
-ช่องที่ยังไม่มียาหรือถูกปิดใช้งานจะถูกปฏิเสธด้วย `404`
+- migration `202609290001_retire_web_dispense` ปิดคำสั่ง `DISPENSE` ที่ค้าง (`PENDING`/`SENT`) เป็น `CANCELLED`
+  และเปลี่ยนค่าเริ่มต้นของ `DeviceCommand.type` เป็น `BUZZ`
+- sync ไม่ส่งคำสั่ง `DISPENSE` ให้กล่องอีก และ `/api/device/wait` ไม่นับเป็นงานค้าง
+- เฟิร์มแวร์ที่ได้รับคำสั่ง `DISPENSE` (จาก server รุ่นเก่า) ไม่ขยับกลไก ตอบ `ACK` หมายเหตุ `web dispense disabled`
+  เพื่อปิดคำสั่งโดยไม่สร้างประวัติการจ่ายยา
+- `GET /api/devices/:id/commands` ยังดูประวัติคำสั่งได้เหมือนเดิม
 
 ## POST /api/medications/device-sync
 

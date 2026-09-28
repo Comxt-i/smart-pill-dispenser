@@ -300,7 +300,7 @@ constexpr unsigned long DISPENSE_STAGGER_MS = 250;
 // (ต่างจาก LED ที่ต่อลง GND แล้วหนีบแรงดันขาจนบูตไม่ขึ้น)
 // ย้ายมาจาก GPIO25 เพื่อเปิดทางให้ไฟสถานะสีแดง
 //
-// GPIO15 มี pull-up ในตัวตอนบูต buzzer จึงอาจร้องสั้นๆ หนึ่งครั้งก่อน setup() รัน
+// GPIO15 มี pull-up ในตัวตอนบูต (ไฟ HIGH ค้าง) passive buzzer จึงเงียบ อย่างมากดังแก๊กเดียว
 constexpr uint8_t BUZZER_PIN = 15;
 
 // ---------------------------------------------------------------------------
@@ -446,7 +446,9 @@ constexpr bool TLS_VERIFY_CERTIFICATE = true;
 
 // ปลุกก่อนถึงเวลามื้อยากี่นาที (0 = ปลุกตรงเวลา)
 constexpr int ALERT_LEAD_MINUTES = 0;
-// เตือนนานสุดกี่นาทีก่อนบันทึกว่า "ขาดยา" — ต้องไม่เกิน grace_minutes ของ server (30 นาที)
+// เตือนนานสุดกี่นาทีก่อนบันทึกว่า "ขาดยา" — ต้องเท่ากับ grace_minutes ของ server (30 นาที)
+// ตัดตรงนาทีที่ครบพอดี (มื้อ 08:00 ขาดยาตั้งแต่ 08:30:00) เหมือน server
+// เดิมตัดตอนนาทีถัดไป กล่องยังเตือนอยู่ตอน 08:30:30 ทั้งที่เว็บขึ้นขาดยาแล้ว กดรับตอนนั้นกลายเป็น "กินช้า"
 constexpr int ALERT_TIMEOUT_MINUTES = 30;
 // ถ้าเครื่องเพิ่งบูตแล้วพบว่ามื้อยาเลยมาเกินเท่านี้ ให้ข้ามไปเลยโดยไม่ปลุกย้อนหลัง
 constexpr int STALE_DOSE_MINUTES = 30;
@@ -458,6 +460,12 @@ constexpr int SNOOZE_MINUTES = 5;
 // SNOOZE_MINUTES * MAX_SNOOZE_PER_DOSE ต้องน้อยกว่า ALERT_TIMEOUT_MINUTES
 // ไม่อย่างนั้นผู้ใช้จะเลื่อนจนเลยเวลาผ่อนผันแล้วกลายเป็นขาดยาโดยไม่ทันรู้ตัว
 constexpr uint8_t MAX_SNOOZE_PER_DOSE = 3;
+// เลื่อนได้เฉพาะเมื่อกลับมาเตือนแล้วยังเหลือเวลาให้กดรับอย่างน้อยเท่านี้ก่อนหมดเวลาผ่อนผัน
+// เดิมเลื่อนตอน 08:24 ได้ กลับมาเตือน 08:29 แล้วขาดยาตอน 08:30 เหลือเวลาตอบแค่นาทีเดียว
+// (มื้อ 08:00 จึงเลื่อนได้ถึง 08:20 หลังจากนั้นเตือนต่อจนหมดเวลา)
+constexpr int SNOOZE_MIN_RESPONSE_MINUTES = 5;
+static_assert(SNOOZE_MINUTES * MAX_SNOOZE_PER_DOSE + SNOOZE_MIN_RESPONSE_MINUTES <= ALERT_TIMEOUT_MINUTES,
+              "every allowed snooze must still leave time to respond");
 
 // เพดานจำนวนเม็ดต่อการจ่ายหนึ่งครั้ง ตรงกับขีดจำกัดของ dispenseMedicine()
 // ไม่ใช่จำนวนรอบหมุนอีกต่อไป เพราะรอบหมุนถูกกำหนดโดยเซ็นเซอร์ว่าได้ครบหรือยัง
@@ -486,22 +494,42 @@ static_assert(BUTTON_STALE_GAP_MS > BUTTON_DEBOUNCE_MS * 3, "stale gap must dwar
 // กดปุ่ม Cancel ค้างเกินเท่านี้ = สั่งหยุดกลไกทันที (กดสั้น = ข้ามมื้อยา)
 constexpr unsigned long CANCEL_HOLD_MS = 1200;
 
-// รูปแบบเสียง: ดัง BEEP_ON_MS ดับ BEEP_OFF_MS ซ้ำทุก ALERT_BEEP_PERIOD_MS
-constexpr unsigned long BEEP_ON_MS = 150;
-constexpr unsigned long BEEP_OFF_MS = 150;
-constexpr unsigned long ALERT_BEEP_PERIOD_MS = 5000;
-// ขั้วสัญญาณของโมดูล buzzer
-//
-// วิธีดูว่าตั้งถูกไหม:
-//   ดังค้างตลอดเวลา (ยกเว้นตอนที่ควรดัง) = ตั้งกลับขั้ว ให้สลับค่านี้
-//   ดังค้างตลอดไม่ว่าจะตั้งค่าไหน = โมดูลแบบ PNP ต่อไฟ 5V แต่ขา ESP32 ส่งได้แค่ 3.3V ปิดไม่สนิท
-//                                  ให้ย้าย VCC ของโมดูลมาที่ 3.3V
-//   true  = ดังเมื่อขา IN เป็น HIGH (โมดูลที่ใช้ทรานซิสเตอร์ NPN ส่วนใหญ่)
-//   false = ดังเมื่อขา IN เป็น LOW  (โมดูล 3 ขาที่ใช้ PNP หลายรุ่น)
-// ตั้งผิดขั้วจะกลับด้าน: ร้องค้างตลอดเวลาที่ควรเงียบ และเงียบตอนที่ควรร้อง
-// true ตรงกับโมดูลที่ออกแบบไว้ (active buzzer ไฟ 5V รับ IN 3.3V แบบ active HIGH)
-// เคยตั้ง false แล้วดังค้างตลอด = โมดูลนี้ดังเมื่อได้ HIGH จริง
+// เสียงเตือนถึงเวลายา: กริ่งสามโน้ตไล่ขึ้น (โด-มี-ซอล ยาวราวครึ่งวินาที ดูทำนองใน alert.cpp)
+// เล่นซ้ำทุก ALERT_REMINDER_PERIOD_MS นับจากต้นเสียงถึงต้นเสียงถัดไป
+// เดิมปี๊บสั้นสองครั้งทุก 5 วินาที ห่างเกินไป คนที่อยู่อีกห้องหรือกำลังทำอย่างอื่นไม่ทันสังเกต
+constexpr unsigned long ALERT_REMINDER_PERIOD_MS = 2000;
+// ยังไม่มีใครกดปุ่มนานเท่านี้: เล่นถี่ขึ้นอีกหน่อยให้สังเกตง่ายขึ้น
+// เป็นเสียงกริ่งเดิม ไม่ดังขึ้น ไม่เปลี่ยนเป็นเสียงแหลมแบบสัญญาณเตือนภัย ผู้สูงอายุจะได้ไม่ตกใจ
+constexpr unsigned long ALERT_ESCALATE_AFTER_MS = 3UL * 60UL * 1000UL;
+constexpr unsigned long ALERT_REMINDER_URGENT_PERIOD_MS = 1200;
+static_assert(ALERT_REMINDER_URGENT_PERIOD_MS < ALERT_REMINDER_PERIOD_MS, "escalation must be more frequent");
+// ขั้วสัญญาณของโมดูล buzzer: ขา IN ค้างที่ระดับไหนตอนเงียบ
+//   true  = เงียบเมื่อ IN เป็น LOW (โมดูลที่ใช้ทรานซิสเตอร์ NPN ส่วนใหญ่ หรือต่อ buzzer ตรง)
+//   false = เงียบเมื่อ IN เป็น HIGH (โมดูล 3 ขาที่ใช้ PNP หลายรุ่น)
+// ตั้งผิดขั้วกับ passive buzzer: ยังดังตอนเตือน แต่ตอนเงียบทรานซิสเตอร์ในโมดูลนำไฟค้าง กินไฟและร้อน
 constexpr bool BUZZER_ACTIVE_HIGH = true;
+
+// ชนิดของ buzzer
+//   passive = ต้องป้อนคลื่นความถี่ถึงจะมีเสียง จ่ายไฟ HIGH ค้างเฉยๆ เงียบ (อย่างมากดังแก๊กตอนเปลี่ยน)
+//   active  = มีวงจรสร้างเสียงในตัว แค่จ่ายไฟก็ดัง
+// ตัวที่ใช้อยู่เป็น passive (ทดสอบกับ Uno: digitalWrite HIGH/LOW เงียบ มีเสียงเฉพาะตอน tone())
+// เดิมเฟิร์มแวร์ขับแบบ active คือเปิด-ปิดไฟค้าง กล่องจึงไม่เคยมีเสียงเตือนเลยทั้งที่ตรรกะการเตือนถูกหมด
+constexpr bool BUZZER_PASSIVE = true;
+// ความถี่เสียง ทดสอบกับ Uno แล้วได้ยินชัดที่ 1000 และ 2000 Hz
+// passive buzzer ส่วนใหญ่ดังที่สุดช่วง 2000-4000 Hz ถ้าเบาไปลองเพิ่มค่านี้
+constexpr uint32_t BUZZER_TONE_HZ = 2000;
+// ช่อง PWM (LEDC) ที่จองให้ buzzer เอง ห้ามใช้ tone() ที่เลือกช่องเอง: เคยทำแบบนั้นกับมอเตอร์สั่น (analogWrite)
+// แล้วไปแย่งช่องของ servo จน servo ไม่หมุน servo ใช้ช่อง 0-3 และ 8-11 มอเตอร์สั่นใช้ 4-6
+constexpr uint8_t BUZZER_LEDC_CHANNEL = 7;
+// core ให้ช่องที่ความถี่และความละเอียดตรงกันใช้ timer ร่วมกัน ความละเอียดต่างจากมอเตอร์สั่นจึงการันตีว่า
+// buzzer ได้ timer ของตัวเอง ไม่ผูกความถี่กับมอเตอร์สั่น
+constexpr uint8_t BUZZER_PWM_RESOLUTION_BITS = 10;
+static_assert((BUZZER_LEDC_CHANNEL / 2) % 4 >= 2 && BUZZER_LEDC_CHANNEL < 16,
+              "buzzer PWM channel must stay off the servo timers (use 4-7 or 12-15)");
+static_assert(BUZZER_LEDC_CHANNEL != VIB_LEDC_CHANNELS[0] && BUZZER_LEDC_CHANNEL != VIB_LEDC_CHANNELS[1] &&
+              BUZZER_LEDC_CHANNEL != VIB_LEDC_CHANNELS[2], "buzzer needs its own PWM channel");
+static_assert(BUZZER_PWM_RESOLUTION_BITS != VIB_PWM_RESOLUTION_BITS,
+              "buzzer must not share a PWM timer with the vibration motors");
 
 // ปิ๊บสั้นๆ หนึ่งครั้งตอนเปิดเครื่อง เพื่อให้รู้ทันทีว่า buzzer ต่อถูกขาและยังดังอยู่
 // ไม่ต้องรอให้ถึงเวลากินยาแล้วค่อยพบว่าเงียบ ตั้ง 0 เพื่อปิด

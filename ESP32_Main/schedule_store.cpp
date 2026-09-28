@@ -123,6 +123,7 @@ void scheduleStageDose(int slotIndex,
   dose.failureReported = false;
   dose.snoozedUntil = -1;
   dose.snoozeCount = 0;
+  dose.acceptedEpoch = 0;
 
   // มื้อที่เครื่องกำลังจัดการอยู่ต้องไม่ถูก sync ดึงกลับไปเป็น Pending
   // รวมถึงการเลื่อนที่ผู้ใช้กดไว้ ต้องไม่หายไปเพราะ sync รอบใหม่
@@ -133,6 +134,7 @@ void scheduleStageDose(int slotIndex,
     dose.failureReported = previous.failureReported;
     dose.snoozedUntil = previous.snoozedUntil;
     dose.snoozeCount = previous.snoozeCount;
+    dose.acceptedEpoch = previous.acceptedEpoch;
   }
 
   ++slot.doseCount;
@@ -240,6 +242,7 @@ DoseRef scheduleTick(int nowMinutes, uint32_t dayKey, bool justBooted)
           slots[s].doses[d].failureReported = false;
           slots[s].doses[d].snoozedUntil = -1;
           slots[s].doses[d].snoozeCount = 0;
+          slots[s].doses[d].acceptedEpoch = 0;
         }
       }
       dayRollover = true;
@@ -262,7 +265,7 @@ DoseRef scheduleTick(int nowMinutes, uint32_t dayKey, bool justBooted)
 
       if (dose.state == DoseState::Pending && nowMinutes >= dueAt)
       {
-        if (justBooted && nowMinutes > dose.minutes + STALE_DOSE_MINUTES)
+        if (justBooted && nowMinutes >= dose.minutes + STALE_DOSE_MINUTES)
         {
           // เพิ่งเปิดเครื่องแล้วพบมื้อที่เลยมานาน: ไม่ปลุกย้อนหลังและไม่รายงานซ้ำ
           // เพราะฝั่ง server ถือว่ามื้อที่ไม่มี log = MISSED อยู่แล้ว
@@ -279,12 +282,12 @@ DoseRef scheduleTick(int nowMinutes, uint32_t dayKey, bool justBooted)
         scheduleSetState(ref, DoseState::Alerting);
       }
 
-      // เลยเวลาผ่อนผันแล้วถือว่าขาดยา
+      // ครบเวลาผ่อนผันแล้วถือว่าขาดยา (ตัดที่นาทีครบพอดี ตรงกับ server ดู ALERT_TIMEOUT_MINUTES)
       //
       // ไม่ต้องตรวจสถานะ Snoozed ตรงนี้ เพราะ scheduleSnooze() การันตีว่า snoozedUntil
-      // ไม่เกิน deadline เสมอ มื้อที่เลื่อนไว้จึงถูกปลุกกลับเป็น Alerting ในบล็อกด้านบน
+      // มาก่อน deadline เสมอ มื้อที่เลื่อนไว้จึงถูกปลุกกลับเป็น Alerting ในบล็อกด้านบน
       // ก่อนถึงบรรทัดนี้แล้ว
-      if (dose.state == DoseState::Alerting && nowMinutes > deadline)
+      if (dose.state == DoseState::Alerting && nowMinutes >= deadline)
       {
         dose.snoozedUntil = -1;
         scheduleSetState(ref, DoseState::Missed);
@@ -366,8 +369,8 @@ bool scheduleCanSnooze(const DoseRef &ref, int nowMinutes)
   if (dose->snoozeCount >= MAX_SNOOZE_PER_DOSE)
     return false;
 
-  // เลื่อนไปก็จะตื่นหลังหมดเวลาผ่อนผันอยู่ดี จึงไม่ให้เลื่อน
-  return nowMinutes + SNOOZE_MINUTES <= dose->minutes + ALERT_TIMEOUT_MINUTES;
+  // กลับมาเตือนแล้วต้องยังเหลือเวลาให้กดรับ ไม่อย่างนั้นการเลื่อนคือการพาไปขาดยา
+  return nowMinutes + SNOOZE_MINUTES + SNOOZE_MIN_RESPONSE_MINUTES <= dose->minutes + ALERT_TIMEOUT_MINUTES;
 }
 
 bool scheduleSnooze(const DoseRef &ref, int nowMinutes)

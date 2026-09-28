@@ -6,6 +6,7 @@
 #include <Wire.h>
 #include "../ESP32_Main/buttons.cpp"
 #include "../ESP32_Main/pill_app.cpp"
+#include "../ESP32_Main/alert.cpp"
 #include "../ESP32_Main/pill_hole.h"
 SerialClass Serial;
 WiFiClass WiFi;
@@ -39,19 +40,48 @@ int digitalRead(uint8_t pin) {
   }
   return levels[pin];
 }
-void digitalWrite(uint8_t pin, int value) { (void)pin; (void)value; }
+// ขา buzzer (ใช้ alert.cpp ตัวจริง ไม่ใช่ตัวปลอม): passive buzzer มีเสียงเฉพาะตอนได้คลื่นความถี่
+// = PWM duty 50% ไฟ HIGH ค้าง (digitalWrite) เงียบ นับว่าถูกสั่ง "ดัง" กี่ครั้ง และ duty ล่าสุด
+const uint32_t BUZZER_TONE = 1u << (BUZZER_PWM_RESOLUTION_BITS - 1);
+int buzzerSoundWrites = 0, buzzerDcWrites = 0, buzzerChannel = -1;
+long buzzerDuty = -1;
+uint32_t buzzerFreq = 0;
+// จังหวะเสียง: นับ "ชุดเสียง" จากช่วงเงียบระหว่างชุด (ไม่ผูกกับโน้ตที่เลือก) และเก็บระดับเสียงที่ใช้
+extern uint32_t nowMs;
+int chimes = 0;
+bool buzzerSounding = false;
+uint32_t buzzerQuietSince = 0;
+std::vector<uint32_t> pitches;
+constexpr uint32_t CHIME_GAP_MS = 300;  // เงียบนานกว่านี้ = จบชุด (ช่วงหยุดในชุดสั้นกว่านี้มาก)
+void digitalWrite(uint8_t pin, int value) { (void)value; if (pin == BUZZER_PIN) ++buzzerDcWrites; }
 void analogWrite(uint8_t pin, int value) { (void)pin; (void)value; }
-bool ledcAttachChannel(uint8_t, uint32_t, uint8_t, uint8_t) { return true; }
-bool ledcWrite(uint8_t, uint32_t) { return true; }
+bool ledcAttachChannel(uint8_t pin, uint32_t freq, uint8_t, uint8_t channel) {
+  if (pin == BUZZER_PIN) { buzzerChannel = channel; buzzerFreq = freq; }
+  return true;
+}
+uint32_t ledcChangeFrequency(uint8_t pin, uint32_t freq, uint8_t) {
+  if (pin == BUZZER_PIN) { buzzerFreq = freq; pitches.push_back(freq); }
+  return freq;
+}
+bool ledcWrite(uint8_t pin, uint32_t duty) {
+  if (pin != BUZZER_PIN) return true;
+  buzzerDuty = duty;
+  const bool sounding = duty == BUZZER_TONE;
+  if (sounding) {
+    ++buzzerSoundWrites;
+    if (!buzzerSounding && nowMs - buzzerQuietSince > CHIME_GAP_MS) ++chimes;
+  } else if (buzzerSounding) {
+    buzzerQuietSince = nowMs;
+  }
+  buzzerSounding = sounding;
+  return true;
+}
 // ไฟสถานะไม่มีผลต่อพฤติกรรมที่เทสต์นี้ตรวจ จึงกลืนทิ้ง
 // แต่ต้องมี ไม่อย่างนั้นลิงก์ไม่ผ่านเพราะ pill_app.cpp เรียกใช้จริง
 void statusLedBegin() {}
 void statusLedFlash(LedColor) {}
 void statusLedSet(LedPattern) {}
 void statusLedUpdate() {}
-void alertSet(AlertPattern) {}
-void alertOneShot(AlertPattern) {}
-void alertUpdate() {}
 void lcdShowMessage(const char*, const char*) { assert(!dispenserIsBusy()); }
 void lcdMedicineTick() { assert(!dispenserIsBusy()); }
 std::string lcdTitle;  // บรรทัดแรกของจอยาครั้งล่าสุด
@@ -64,7 +94,6 @@ bool rtcIsValid() { return true; }
 // Reached only from appBegin()/appStatusJson(), which this test never calls.
 // --gc-sections drops them on ELF, but MinGW/PE keeps every function, so without
 // these the test cannot link on Windows at all.
-void alertBegin() {}
 void eventQueueBegin() {}
 void netSyncBegin() {}
 void netSyncService() {}
@@ -206,6 +235,44 @@ int main() {
   assert(pulses.empty() && reservations==0 && savedEvents.size()==3);
   for (const auto &e:savedEvents) assert(strcmp(e.status,"SKIPPED")==0);
 
+  // The buzzer really sounds while a dose is due (real alert.cpp driving GPIO15, not a stub),
+  // keeps reminding, and falls silent once the round is handled.
+  // The box has a PASSIVE buzzer: it only sounds when fed a tone. The firmware used to switch the
+  // pin HIGH/LOW like an active buzzer, so the box never made a sound although the logic was right.
+  resetCase(); alertBegin();
+  assert(buzzerChannel==BUZZER_LEDC_CHANNEL);  // its own PWM channel
+  buzzerSoundWrites=0; buzzerDcWrites=0; chimes=0; pitches.clear(); buzzerQuietSince=0;  // forget the boot chirp
+  for (int i=0;i<3;++i) tick(100);
+  assert(chimes==1);  // the first reminder starts at once, not after a period
+  for (int i=0;i<7;++i) tick(100);  // let the first chime finish (well before the next one)
+  assert(chimes==1);
+  // A gentle chime of several rising notes, not one flat beep ("don't make it frightening").
+  { std::vector<uint32_t> firstChime=pitches;
+    assert(firstChime.size()>=2);
+    for (size_t i=1;i<firstChime.size();++i) assert(firstChime[i]>firstChime[i-1]);
+    for (uint32_t hz:firstChime) assert(hz>=1500 && hz<=3500); }  // where a passive buzzer is loud
+  // Every ALERT_REMINDER_PERIOD_MS (2 s). It used to be every 5 s: "too far apart" to notice.
+  chimes=0;
+  for (int i=0;i<500;++i) tick(20);  // 10 s, fine steps so chime timing is as on the box
+  assert(chimes>=4 && chimes<=6);
+  assert(buzzerDcWrites==0);     // a plain HIGH would be silent on a passive buzzer
+  // Nobody has responded for ALERT_ESCALATE_AFTER_MS: a little more often, same chime.
+  for (uint32_t t=0;t<ALERT_ESCALATE_AFTER_MS;t+=500) tick(500);
+  chimes=0;
+  for (int i=0;i<500;++i) tick(20);  // 10 s
+  assert(chimes>=7 && chimes<=10);
+  press(CANCEL_BUTTON_PIN); release(CANCEL_BUTTON_PIN);
+  for (int i=0;i<20;++i) tick(100);  // the skip click finishes
+  { const int afterSkip=buzzerSoundWrites;
+    for (int i=0;i<100;++i) tick(100);
+    assert(buzzerSoundWrites==afterSkip);
+    assert(buzzerDuty==(BUZZER_ACTIVE_HIGH ? 0 : long((1u<<BUZZER_PWM_RESOLUTION_BITS)-1))); }  // held at the module's idle level
+  // The next alert starts gentle again, not at the escalated pace the previous one reached.
+  resetCase(); chimes=0; buzzerQuietSince=0;
+  for (int i=0;i<500;++i) tick(20);
+  assert(chimes>=4 && chimes<=6);
+  press(CANCEL_BUTTON_PIN); release(CANCEL_BUTTON_PIN);
+
   // One physical short press accepts all three; reservations precede motion.
   resetCase(); press(DISPENSE_BUTTON_PIN); release(DISPENSE_BUTTON_PIN);
   if (!ENABLE_SERVO_MOVEMENT) {
@@ -234,6 +301,11 @@ int main() {
   if (ENABLE_PILL_SENSOR) tick(PILL_SETTLE_MS);
   assert(!dispenserIsBusy() && savedEvents.size()==3 && deferredEventCount==0);
   for (const auto &e:savedEvents) assert(strcmp(e.status,"DISPENSED")==0);
+  // Logged at the moment green was pressed, not when the last queued plate finished, so a
+  // round accepted in time is never judged "taken late" by the server.
+  { const uint32_t acceptedAt=dose(0).acceptedEpoch;
+    assert(acceptedAt!=0 && rtcLocalEpoch()>acceptedAt);  // plates really finished later
+    for (const auto &e:savedEvents) assert(e.localEpoch==acceptedAt); }
   for (int i=0;i<3;++i) assert(dose(i).state==DoseState::Done);
   assert(reservations==3); // No repeat reservation when third channel gets capacity.
 
